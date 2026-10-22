@@ -1,0 +1,400 @@
+name: Build and Push
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'VERSION'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (e.g. 0.2.0). Empty = read the VERSION file.'
+        required: false
+        default: ''
+      publish:
+        description: 'Push to GHCR. Uncheck to build and smoke test only.'
+        type: boolean
+        default: true
+
+env:
+  REGISTRY: ghcr.io
+  # Lowercase: GHCR rejects capitals. Named for this repo so the v1 fork's
+  # image and this one do not overwrite each other's :latest.
+  IMAGE_NAME: corridorkey2-webui
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  determine-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          INPUT_VERSION='${{ github.event.inputs.version }}'
+
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            VERSION="${INPUT_VERSION}"
+          else
+            VERSION="$(tr -d '[:space:]' < VERSION)"
+          fi
+
+          if [[ -z "${VERSION}" ]]; then
+            echo "::error::VERSION is empty."
+            exit 1
+          fi
+
+          # The file holds the bare number; image tags are v-prefixed.
+          [[ "${VERSION}" == v* ]] || VERSION="v${VERSION}"
+
+          # Docker tags allow a narrow character set; sanitise rather than fail.
+          VERSION="$(printf '%s' "${VERSION}" | tr -c 'A-Za-z0-9._-' '-')"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            PUBLISH='${{ github.event.inputs.publish }}'
+          else
+            # The only other trigger is a push that changed VERSION.
+            PUBLISH=true
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "publish=${PUBLISH}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION} publish=${PUBLISH}"
+
+  test:
+    name: Vet and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "${unformatted}" ]]; then
+            echo "::error::gofmt wants changes in: ${unformatted}"
+            exit 1
+          fi
+
+      - name: go test
+        run: go test ./...
+
+  build-and-push:
+    name: Build image
+    runs-on: ubuntu-latest
+    needs: [determine-version, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      # The image carries PyTorch and the CUDA wheels, which is several GB more
+      # than a stock runner has comfortable room for once buildx has a cache
+      # and a loaded image as well.
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
+          sudo apt-get clean || true
+          docker system prune -af || true
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      # One build, loaded locally, smoke tested and then pushed as-is. Building
+      # twice would mean fetching the torch wheels twice and keeping two copies
+      # of a multi-gigabyte image on the runner.
+      - name: Build amd64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          # linux/amd64 only: the CUDA wheels this image installs have no
+          # arm64 build, and neither does any box you would rent to run it.
+          platforms: linux/amd64
+          load: true
+          build-args: |
+            VERSION=${{ needs.determine-version.outputs.version }}
+            CK_REPO=${{ github.server_url }}/${{ github.repository }}.git
+            CK_REF=upstream
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.determine-version.outputs.version }}
+          tags: ${{ env.IMAGE_NAME }}:ci
+          cache-from: type=gha,scope=ui
+          cache-to: type=gha,mode=min,scope=ui
+
+      - name: Smoke test the image contents
+        # The promise of this image: the UI, the keyer from the `upstream`
+        # branch and a working PyTorch — and not one byte of model weight.
+        # Assert it rather than trusting it.
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh "${IMAGE_NAME}:ci" -c '
+            set -eu
+
+            [ -x /usr/local/bin/ck-web ] || { echo "missing /usr/local/bin/ck-web"; exit 1; }
+            echo "binary present"
+
+            ck-web -h 2>&1 | grep -q -- "-mode" || { echo "-mode flag absent"; exit 1; }
+            echo "flags present"
+
+            # The keyer, and which commit of it. This is the whole reason the
+            # build clones the upstream branch, so it is printed in the log.
+            [ -f /opt/corridorkey/infer.py ] || { echo "no infer.py in the image"; exit 1; }
+            cat /opt/corridorkey/.ck2-source-revision
+            echo "corridorkey 2.0 runtime present"
+
+            python=/opt/venv/bin/python
+            [ -x "$python" ] || { echo "no venv in the image"; exit 1; }
+            "$python" -c "import torch, torchvision; print(\"torch\", torch.__version__, \"torchvision\", torchvision.__version__)"
+            "$python" -c "import cv2, transformers, timm, safetensors, utils3d; print(\"runtime deps import\")"
+            echo "inference stack present"
+
+            ffmpeg -hide_banner -version | head -1
+            ffmpeg -hide_banner -decoders 2>/dev/null | grep -qw exr || {
+              echo "this ffmpeg cannot decode EXR, so the viewer cannot show mattes"; exit 1; }
+            echo "ffmpeg decodes exr"
+
+            # Without aria2c the image still works, but every module download
+            # drops to one connection — the exact problem this step exists to
+            # keep from shipping silently.
+            command -v aria2c >/dev/null || { echo "aria2c missing: downloads would be single-stream"; exit 1; }
+            aria2c --version | head -1
+            aria2c --max-connection-per-server=16 --help >/dev/null 2>&1 || {
+              echo "aria2c rejected 16 connections per server"; exit 1; }
+            echo "aria2c accepts 16 connections per server"
+
+            # The weight folders must be the volume, or an install would land
+            # in the container layer and be lost with it.
+            [ "$(readlink /opt/corridorkey/weights)" = "/data/weights" ] || {
+              echo "weights/ is not a link into the volume"; exit 1; }
+            [ "$(readlink /opt/corridorkey/vfms)" = "/data/vfms" ] || {
+              echo "vfms/ is not a link into the volume"; exit 1; }
+            echo "weights and vfms point into /data"
+
+            found="$(find / -xdev \( -name "*.safetensors" -o -name "*.pth" -o -name "*.ckpt" \
+                     -o -name "*.gguf" -o -name "*.pt" \) -size +1M 2>/dev/null || true)"
+            if [ -n "${found}" ]; then
+              echo "weights leaked into the image:"; echo "${found}"; exit 1
+            fi
+            echo "no model weights in the image"
+
+            size_mb=$(du -sm / 2>/dev/null | cut -f1 || echo 0)
+            echo "rootfs about ${size_mb} MB"
+          '
+          echo "content smoke test passed"
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+
+      - name: Smoke test a dev run end to end
+        # A dev run is the mode someone tries first, so it gets the real test:
+        # the UI serves, auth gates the API, a clip is created, the mock keyer
+        # produces frames, and module installs are refused.
+        run: |
+          set -euo pipefail
+
+          docker run -d --name ck-web-ci \
+            -p 8080:8080 \
+            -e CKWEB_MODE=dev \
+            -e CKWEB_TOKEN=ci-token \
+            "${IMAGE_NAME}:ci"
+
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:8080/api/health?t=ci-token" >/dev/null 2>&1; then
+              ok=1; break
+            fi
+            sleep 1
+          done
+          if [[ "${ok}" != "1" ]]; then
+            echo "server never became healthy"; docker logs ck-web-ci; exit 1
+          fi
+          echo "health answers"
+
+          # The startup banner names the pinned runtime and says whether torch
+          # saw a GPU. On a runner it will say cuda False, which is correct.
+          docker logs ck-web-ci 2>&1 | grep -E 'torch|sha ' || true
+
+          curl -fsS "http://127.0.0.1:8080/api/health?t=ci-token" | tee /tmp/health.json
+          grep -q '"dev":true' /tmp/health.json
+          grep -q '"provider":"mock"' /tmp/health.json
+          echo "dev mode selected the mock provider"
+
+          # The shell is public; the API is not.
+          curl -fsS http://127.0.0.1:8080/ | grep -q "CorridorKey Web"
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/clips)
+          if [[ "${code}" != "401" ]]; then
+            echo "expected 401 without a token, got ${code}"; exit 1
+          fi
+          echo "token gates the api"
+
+          # No weights are advertised as present on a fresh container.
+          curl -fsS "http://127.0.0.1:8080/api/modules?t=ci-token" | grep -q '"present":false'
+          echo "modules report as missing, as they should"
+
+          # And a dev run refuses to fetch one.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            "http://127.0.0.1:8080/api/modules/corridorkey2/install?t=ci-token")
+          if [[ "${code}" != "403" ]]; then
+            echo "expected 403 for an install in dev mode, got ${code}"; exit 1
+          fi
+          echo "dev run refuses downloads"
+
+          # A real plate, made here, so the mock keyer has something to read.
+          docker exec ck-web-ci sh -c '
+            mkdir -p /data/ClipsForInference/CiPlate &&
+            ffmpeg -v error -f lavfi -i "color=c=0x00b140:s=320x180:d=1:r=12" \
+              -vf "drawbox=x=120:y=50:w=80:h=90:color=0xd8a080@1:t=fill" \
+              -pix_fmt yuv420p /data/ClipsForInference/CiPlate/Input.mp4'
+          curl -fsS "http://127.0.0.1:8080/api/clips?t=ci-token" | grep -q '"name":"CiPlate"'
+          echo "clip discovered"
+
+          curl -fsS -X POST "http://127.0.0.1:8080/api/clips/CiPlate/alpha?t=ci-token" >/dev/null
+          curl -fsS -X POST "http://127.0.0.1:8080/api/clips/CiPlate/key?t=ci-token" \
+            -H 'Content-Type: application/json' \
+            -d '{"linear":false,"despill":8,"despeckle":true,"speckSize":200,"refiner":1}' >/dev/null
+
+          keyed=0
+          for _ in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:8080/api/clips?t=ci-token" | grep -q '"stage":"keyed"'; then
+              keyed=1; break
+            fi
+            sleep 2
+          done
+          if [[ "${keyed}" != "1" ]]; then
+            echo "the mock keyer never finished"
+            curl -s "http://127.0.0.1:8080/api/jobs?t=ci-token" || true
+            docker logs ck-web-ci
+            exit 1
+          fi
+          echo "mock keyer produced output"
+
+          # Every stage the viewer offers must actually have frames behind it.
+          for view in alpha comp matte fg processed; do
+            curl -fsS "http://127.0.0.1:8080/api/clips/CiPlate/frames?view=${view}&t=ci-token" \
+              | grep -q '"count":[1-9]' || { echo "no frames in ${view}"; exit 1; }
+          done
+          echo "alpha, comp, matte, fg and processed all have frames"
+
+          # One frame really decodes as a PNG.
+          curl -fsS "http://127.0.0.1:8080/api/clips/CiPlate/frame?view=comp&i=0&t=ci-token" \
+            -o /tmp/frame.png
+          file /tmp/frame.png | grep -qi 'PNG image'
+          echo "frame serves as a png"
+
+          # And the export path stitches it back into a file.
+          curl -fsS "http://127.0.0.1:8080/api/clips/CiPlate/export?view=comp&format=mp4&t=ci-token" \
+            -o /tmp/out.mp4
+          [[ -s /tmp/out.mp4 ]] || { echo "export produced nothing"; exit 1; }
+          echo "export round trip ok"
+
+          # A traversing clip name is refused rather than sanitised into a hit.
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "http://127.0.0.1:8080/api/clips/..%2F..%2Fetc/frames?view=comp&t=ci-token")
+          if [[ "${code}" == "200" ]]; then
+            echo "a traversing clip name was served"; exit 1
+          fi
+          echo "traversing clip name refused (${code})"
+
+          docker rm -f ck-web-ci >/dev/null
+          echo "dev run smoke test passed"
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+
+      - name: Log in to GitHub Container Registry
+        if: needs.determine-version.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        # The image that just passed the smoke tests, retagged — not a rebuild.
+        # The pinned tag plus the rolling one: :latest always points at the
+        # newest build. One variant; nothing in it is OS-specific.
+        if: needs.determine-version.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          V="${{ needs.determine-version.outputs.version }}"
+          IMG="${REGISTRY}/${{ github.repository_owner }}/${IMAGE_NAME}"
+
+          docker tag "${IMAGE_NAME}:ci" "${IMG}:${V}"
+          docker tag "${IMAGE_NAME}:ci" "${IMG}:latest"
+
+          docker push "${IMG}:${V}"
+          docker push "${IMG}:latest"
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+
+      - name: Summary
+        run: |
+          V="${{ needs.determine-version.outputs.version }}"
+          IMG="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}"
+          echo "**Version:** \`${V}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Published:** ${{ needs.determine-version.outputs.publish }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${IMG}:${V}\`, \`${IMG}:latest\` (linux/amd64)" >> $GITHUB_STEP_SUMMARY
+          echo "**Carries:** the UI, the keyer from the \`upstream\` branch, PyTorch, ffmpeg and aria2c — no weights" >> $GITHUB_STEP_SUMMARY
+          echo "**Dev run:** \`docker run -p 8080:8080 -e CKWEB_MODE=dev ${IMG}:${V}\`" >> $GITHUB_STEP_SUMMARY
+
+  release:
+    name: Tag and release
+    runs-on: ubuntu-latest
+    needs: [determine-version, build-and-push]
+    if: needs.determine-version.outputs.publish == 'true'
+    permissions:
+      # The top-level grant is read-only; only this job writes refs.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Creates the tag at this commit if it does not exist yet. A tag is
+      # already enough to make the source downloadable — GitHub serves
+      # /archive/refs/tags/<tag>.zip and .tar.gz for any tag — and the release
+      # attaches those same archives to a page with notes. Nothing is built here.
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.determine-version.outputs.version }}
+          name: ${{ needs.determine-version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          body: |
+            Web UI for CorridorKey 2.0, for keying on a rented GPU box.
+
+            The image carries the UI, the keyer from this fork's `upstream`
+            branch and a working PyTorch. It carries no model weights: the
+            Modules page fetches the ~5.1 GB at runtime, into the volume.
+
+            ```
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.determine-version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+            ```
+
+            Try the UI with no GPU and no weights:
+
+            ```
+            docker run --rm -p 8080:8080 -e CKWEB_MODE=dev \
+              ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.determine-version.outputs.version }}
+            ```
+
+      - name: Summary
+        run: |
+          V="${{ needs.determine-version.outputs.version }}"
+          echo "**Tag:** \`${V}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Assets:** source zip and tar.gz, generated by GitHub" >> $GITHUB_STEP_SUMMARY
