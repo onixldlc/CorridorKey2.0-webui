@@ -207,9 +207,6 @@ RTX 3060 — usually the cheapest card that can run this at all — at the botto
 of the list without hiding anything larger. On 12 GB, turn on Low VRAM in the
 key panel; it trades speed for fitting in the card.
 
-`openssh-server` is in the image so those modes have an sshd to start; nothing
-in the image starts it itself.
-
 ## The weights
 
 **No weights ship in the image.** The Modules page fetches the four things the

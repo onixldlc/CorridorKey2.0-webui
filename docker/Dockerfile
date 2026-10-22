@@ -75,12 +75,8 @@ RUN apt-get update
 # link, and ck-web shells out to aria2c for 16 connections per file.
 #
 # git is here for requirements.txt, which pulls utils3d from a git URL.
-#
-# openssh-server is here for the rented-box consoles whose shell launch mode
-# expects the image to provide sshd. Nothing in this image starts it; see
-# docker/onstart.sh.
 RUN apt-get install -y --no-install-recommends \
-    ca-certificates ffmpeg aria2 git python3 python3-venv openssh-server
+    ca-certificates ffmpeg aria2 git python3 python3-venv
 
 RUN rm -rf /var/lib/apt/lists/*
 
