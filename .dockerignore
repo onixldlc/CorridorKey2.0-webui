@@ -1,0 +1,8 @@
+.git
+.github
+.smoke
+.testdata
+data
+shots
+ck-web
+*.log

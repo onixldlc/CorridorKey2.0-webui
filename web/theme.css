@@ -1,0 +1,197 @@
+/* The ArtCraft brutalist system, transcribed from the values the desktop app
+   documents in artcraft-native/src/theme.rs: near-black surfaces, white/15
+   hairlines, Archivo display type, Inter body, Geist Mono labels, 3px corners
+   on anything pressable and square large surfaces. Dark only, like the app. */
+
+:root {
+  /* Surfaces */
+  --ui-background: #121316; /* the page behind the feed */
+  --ui-panel: #101014;      /* top bar, modals, lightbox */
+  --ui-controls: #1e1f22;   /* sidebar, prompt box, toolbar buttons */
+  --chrome: #0a0a0c;        /* window chrome behind the content panel */
+  --ui-sunken: #060607;     /* wells and inputs */
+
+  /* Ink */
+  --base-fg: #f2f1ee;
+  --ink-strong: #ffffff;
+  --muted: rgba(242, 241, 238, 0.6);
+  --dim: rgba(242, 241, 238, 0.5);
+  --faint: rgba(242, 241, 238, 0.4);
+  --sidebar-ink: rgba(255, 255, 255, 0.72);
+
+  /* Lines and washes */
+  --line: rgba(255, 255, 255, 0.15);
+  --line-dashed: rgba(255, 255, 255, 0.25);
+  --line-strong: rgba(242, 241, 238, 0.4);
+  --wash: rgba(255, 255, 255, 0.05);
+  --wash-selected: rgba(255, 255, 255, 0.08);
+  --wash-hover: rgba(255, 255, 255, 0.1);
+
+  /* Accents */
+  --primary: #2d81ff;
+  --primary-400: #59a7ff;
+  --accent-ink: #74aaff;
+  --invert-bg: #ffffff;
+  --invert-fg: #0b0b0c;
+  --red-400: #f87171;
+  --danger: #d33242;
+  --badge: #ffc14d;
+
+  /* Shape and metrics */
+  --radius: 3px;        /* buttons, inputs, menus, the prompt box */
+  --panel-radius: 8px;  /* the content panel */
+  --panel-gap: 8px;
+  --sidebar-w: 232px;
+  --titlebar-h: 40px;
+  --header-h: 48px;
+  --row-h: 32px;
+  --control-h: 34px;
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+
+  --font-body: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Archivo", var(--font-body);
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+/* The hidden attribute is only a display:none in the UA sheet, so any rule
+   that sets display on the same element silently beats it. Everything here
+   toggles visibility with .hidden = true, so make the attribute win once
+   rather than patching each selector that outranks it. */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--chrome);
+  color: var(--base-fg);
+  font: 400 14px/1.45 var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Archivo 620 at 118% width is the display face. */
+.font-display {
+  font-family: var(--font-display);
+  font-weight: 620;
+  font-stretch: 118%;
+  letter-spacing: -0.01em;
+}
+
+/* The .hud-label: 11px Geist Mono, upper case, 0.15em apart. */
+.hud-label {
+  font: 500 11px/1 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--faint);
+}
+
+/* Section labels and mono buttons are tracked a little tighter. */
+.mono-label {
+  font: 650 11px/1 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+a { color: var(--accent-ink); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--wash-hover); border-radius: 4px; }
+
+/* ── Pressables ─────────────────────────────────────────────────────────── */
+
+button, .btn {
+  height: var(--control-h);
+  padding: 6px 12px;
+  background: var(--ui-controls);
+  color: var(--base-fg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: 500 14px/1 var(--font-body);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+button:hover, .btn:hover {
+  background: var(--wash-hover);
+  border-color: var(--line-strong);
+  color: var(--ink-strong);
+}
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:disabled:hover { background: var(--ui-controls); border-color: var(--line); }
+
+/* The inverted primary: a white block with near-black text. */
+.btn-primary {
+  background: var(--invert-bg);
+  color: var(--invert-fg);
+  border-color: var(--invert-bg);
+  font-weight: 600;
+}
+.btn-primary:hover { background: #e8e8e4; color: var(--invert-fg); border-color: #e8e8e4; }
+
+.btn-mono {
+  font: 650 11px/1 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  height: 28px;
+  padding: 0 10px;
+}
+
+.btn-ghost { background: transparent; border-color: transparent; color: var(--dim); }
+.btn-ghost:hover { background: var(--wash-hover); border-color: transparent; }
+
+.btn-danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
+
+input[type="text"], input[type="number"], input[type="password"], select, textarea {
+  height: var(--control-h);
+  padding: 6px 10px;
+  background: var(--ui-sunken);
+  color: var(--base-fg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: 400 14px/1 var(--font-body);
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent-ink);
+}
+input::placeholder { color: var(--muted); }
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: var(--wash-hover);
+  border-radius: 2px;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px; height: 12px;
+  background: var(--base-fg);
+  border-radius: 50%;
+  cursor: pointer;
+}
+input[type="range"]::-moz-range-thumb {
+  width: 12px; height: 12px; border: 0;
+  background: var(--base-fg); border-radius: 50%; cursor: pointer;
+}
+
+/* ── Badges ─────────────────────────────────────────────────────────────── */
+
+.badge {
+  font: 650 10px/1 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--faint);
+  white-space: nowrap;
+}
+.badge-accent { color: var(--accent-ink); border-color: rgba(116, 170, 255, 0.4); }
+.badge-good   { color: var(--base-fg); border-color: var(--line-strong); }
+.badge-warn   { color: var(--badge); border-color: rgba(255, 193, 77, 0.4); }
+.badge-bad    { color: var(--red-400); border-color: rgba(248, 113, 113, 0.4); }

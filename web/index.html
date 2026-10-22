@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CorridorKey Web</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- Loaded as print, then switched to all: a render-blocking webfont
+     stylesheet means no glyph paints until Google answers, and on a tunnelled
+     box that can be never. The fallback stack carries the first paint. -->
+<link rel="stylesheet" media="print" onload="this.media='all'"
+      href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@118,620&family=Inter:wght@400;500;600&family=Geist+Mono:wght@400;500;650&display=swap">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@118,620&family=Inter:wght@400;500;600&family=Geist+Mono:wght@400;500;650&display=swap"></noscript>
+<link rel="stylesheet" href="theme.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+  <div class="titlebar">
+    <div class="mark">CK</div>
+    <div class="crumbs">
+      <span class="hud-label" id="crumb-root">KEY</span>
+      <span class="sep">/</span>
+      <span class="here font-display" id="crumb-here">Clips</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="stat">
+      <span class="badge" id="mode-stat">—</span>
+      <span class="hud-label" id="gpu-stat">GPU —</span>
+      <button class="btn-ghost btn-mono" id="toggle-sidebar" title="Hide the sidebar">Panel</button>
+    </div>
+  </div>
+
+  <nav class="sidebar">
+    <div class="section mono-label" style="color:var(--faint)">Key</div>
+    <div class="row selected" data-page="clips"><span class="ico">▣</span>Clips<span class="count" id="n-clips"></span></div>
+    <div class="row" data-page="viewer"><span class="ico">◧</span>Viewer</div>
+    <div class="section mono-label" style="color:var(--faint)">Studio</div>
+    <div class="row" data-page="queue"><span class="ico">≡</span>Queue<span class="count" id="n-jobs"></span></div>
+    <div class="section mono-label" style="color:var(--faint)">Assets</div>
+    <div class="row" data-page="modules"><span class="ico">◆</span>Modules<span class="count" id="n-modules"></span></div>
+    <div class="row" data-page="about"><span class="ico">?</span>About</div>
+    <div class="foot">
+      <span class="hud-label" id="host-stat">—</span>
+      <span class="hud-label">ck-web · corridorkey</span>
+    </div>
+  </nav>
+
+  <main class="panel">
+    <header>
+      <h1 class="font-display" id="page-title">Clips</h1>
+      <span class="badge" id="page-badge" hidden></span>
+      <div class="spacer"></div>
+      <button class="btn-mono" id="refresh">Refresh</button>
+    </header>
+
+    <div id="dev-note" class="dev-note" hidden>
+      <span class="badge badge-warn">dev run</span>
+      <span>The mock keyer is active: results are a stand-in and no model will be downloaded. Start with
+      <code>-mode prod</code> on the GPU box.</span>
+    </div>
+
+    <div class="body" id="body"></div>
+
+    <div class="dock" id="dock" hidden>
+      <div class="params">
+        <div class="field">
+          <span class="hud-label">Input</span>
+          <button class="switch" id="p-gamma" data-on="false">sRGB</button>
+        </div>
+        <div class="field">
+          <span class="hud-label">Despill</span>
+          <input type="range" id="p-despill" min="0" max="10" step="1" value="5">
+          <span class="val" id="p-despill-v">5</span>
+        </div>
+        <div class="field" data-for="corridorkey2">
+          <span class="hud-label" title="How far the model trusts an uploaded hint">Hint trust</span>
+          <input type="range" id="p-hintq" min="0" max="1" step="0.05" value="0.95">
+          <span class="val" id="p-hintq-v">0.95</span>
+        </div>
+        <div class="field" data-for="corridorkey2">
+          <span class="hud-label" title="Staged inference for cards with little VRAM">Low VRAM</span>
+          <button class="switch" id="p-lowvram" data-on="false">Off</button>
+        </div>
+        <div class="field" data-for="mock">
+          <span class="hud-label">Despeckle</span>
+          <button class="switch on" id="p-despeckle" data-on="true">On</button>
+          <input type="number" id="p-speck" min="0" step="50" value="400" title="Minimum pixels for a spot">
+        </div>
+        <div class="field" data-for="mock">
+          <span class="hud-label">Refiner</span>
+          <input type="number" id="p-refiner" min="0" max="4" step="0.1" value="1">
+        </div>
+      </div>
+      <div class="go">
+        <span class="hud-label" id="dock-target">NO CLIP SELECTED</span>
+        <div class="spacer"></div>
+        <button class="btn-mono" id="act-alpha">Generate alpha hint</button>
+        <span class="hud-label" id="act-note" hidden></span>
+        <button class="btn-primary" id="act-key">Key clip</button>
+      </div>
+    </div>
+  </main>
+</div>
+<div id="gate" hidden>
+  <form class="gate-card" id="gate-form">
+    <div class="mark">CK</div>
+    <h2 class="font-display">Access token</h2>
+    <p>This instance was started with a token. It is printed in the server's
+       own log, next to a ready-made link — <code>podman logs ck-web</code> or
+       <code>docker logs ck-web</code> on the box running it.</p>
+    <p>Paste it here and this browser will remember it.</p>
+    <p class="gate-note badge badge-bad" id="gate-note" hidden></p>
+    <input type="password" id="gate-input" autocomplete="off" spellcheck="false"
+           placeholder="token">
+    <button type="submit" class="btn-primary">Unlock</button>
+    <span class="hud-label">OR OPEN THE PAGE AS /?t=&lt;TOKEN&gt;</span>
+  </form>
+</div>
+<div id="toasts"></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

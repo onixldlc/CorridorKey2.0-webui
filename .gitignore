@@ -1,0 +1,31 @@
+# Build output
+/ck-web
+
+# Local data root and scratch from test runs
+/data/
+/.testdata/
+/.smoke/
+/shots/
+
+# Go
+*.test
+*.out
+
+# Media, in case a plate is ever dropped in the tree by accident
+*.mov
+*.mp4
+*.exr
+*.png
+*.jpg
+*.jpeg
+
+# Weights, same reason — none of this belongs in the repo or the image
+*.safetensors
+*.pth
+*.pt
+*.ckpt
+*.npz
+
+# Local / studio-specific files
+.env
+.claude/
