@@ -126,25 +126,48 @@ docker run -d --name ck-web \
   ghcr.io/onixldlc/corridorkey2-webui:latest
 ```
 
-`/data` is **not** a checkout — it holds your clips and the weights the Modules
-page installs, and that is all. Replacing or upgrading the container costs
-nothing, because nothing in it is yours.
+`/data` is **not** a checkout — it holds your clips, the weights the Modules
+page installs, and the Python stack the keyer runs on. Replacing or upgrading
+the container costs nothing, because nothing in it is yours.
 
-Budget the disk from what actually lands on it. The image unpacks to about
-9 GB. The weights are 5.08 GB — 2.54 for the keyer, 1.65 for C-RADIO, 0.40 for
-MoGe-2, 0.26 for RVM. Half-float EXR output runs about 20 MB per frame across
-the four stages, so the rest is yours: 40 GB leaves roughly 24 GiB of working
-room, near a thousand frames. Under 20 GB the image and the weights alone do
-not both fit.
+**The image carries no torch.** It is the UI, the keyer and ffmpeg: a few
+hundred megabytes that pull in seconds. On first start `bootstrap.sh` fetches
+torch and its CUDA libraries into `/data/venv` with aria2c, at the full speed
+of the box's link rather than pip's one stream, and stamps what it built. Every
+later start — including after an image upgrade — matches the stamp and skips
+straight to the server. Four of torch's dependencies are left out, because
+nothing in the keyer reaches them: `nccl` and `nvshmem` are multi-GPU
+collectives and this runs on one card, `cusparselt` is unreferenced, and
+`triton` only matters to `torch.compile`, which the runtime never calls. That
+is 863 MiB saved on every fetch.
+
+Budget the disk from what actually lands on it:
+
+```
+  image                 ~0.4 GB compressed, under 1 GB unpacked
+  /data/venv            ~8 GiB    torch + the CUDA libraries, unpacked
+  /data/wheels          ~3.3 GB   the cache, kept so a rebuild is instant
+  /data/weights, vfms    4.73 GiB 2.54 keyer, 1.65 C-RADIO, 0.40 MoGe-2, 0.26 RVM
+  /data/ClipsForInference  yours   about 20 MB per frame across the four stages
+```
+
+So 40 GB leaves roughly 21 GiB of working room, several hundred frames. Set
+`CKWEB_KEEP_WHEELS=0` to drop the cache once the venv is built and get 3.3 GB
+back, at the cost of a full refetch if the venv is ever rebuilt.
+
+The payoff only lands if `/data` is a real volume. Point it at a host
+directory or a named volume and the 3.3 GB is paid once per box; leave it on
+the container's own ephemeral disk and every rent pays again.
 
 Mind the unit: disk fields on rental consoles are decimal GB and `df` reports
 GiB, so a 40 GB disk is 37.3 GiB.
 
 ```
 /opt/corridorkey/      the keyer, from the upstream branch (in the image)
-/opt/venv/             torch 2.9.1 + cu128, upstream's pinned versions
+/data/venv/            torch + cu128, built on first start, kept across upgrades
+/data/wheels/          the wheel cache aria2c filled, and the stamp
 /data/ClipsForInference/   your plates and their outputs
-/data/weights/, /data/vfms/   the 5.1 GB, symlinked into the checkout
+/data/weights/, /data/vfms/   the 4.73 GiB, symlinked into the checkout
 ```
 
 `CKWEB_TOKEN=auto` generates an access token and prints it, with a ready-made
@@ -293,7 +316,7 @@ layout the viewer reads:
 | `-provider` | `CKWEB_PROVIDER` | `auto` — or `corridorkey2` / `mock` | `auto` |
 | `-root` | `CKWEB_ROOT` | `/data` — the checkout | `/opt/corridorkey` |
 | `-clips` | `CKWEB_CLIPS` | `<root>/ClipsForInference` | `/data/ClipsForInference` |
-| `-python` | `CKWEB_PYTHON` | `<root>/venv/bin/python`, else `python3` | `/opt/venv/bin/python` |
+| `-python` | `CKWEB_PYTHON` | `<root>/venv/bin/python`, else `python3` | `/data/venv/bin/python` |
 | `-ffmpeg` | `CKWEB_FFMPEG` | `ffmpeg` | `ffmpeg` |
 | `-aria2` | `CKWEB_ARIA2` | `aria2c` — `off` forces the one-stream fallback | `aria2c` |
 | `-token` | `CKWEB_TOKEN` | empty — **no auth**; `auto` generates one and logs it | unset |
@@ -327,11 +350,12 @@ cloning. Nothing else has to be touched — it can be done from the web editor.
 **publish** box builds and smoke tests without pushing or tagging anything.
 
 CI asserts the promise rather than trusting it: `infer.py` is in the image and
-its commit is printed, `torch`, `torchvision`, `cv2`, `transformers` and
-`utils3d` all import, `weights/` and `vfms/` really are links into `/data`,
-`aria2c` accepts 16 connections, and the build **fails** if any
+its commit is printed, `bootstrap.sh` and `wheels.py` are present and
+executable, `wheels.py` resolves the stack to real URLs with checksums and
+reports the four packages it drops, `weights/` and `vfms/` really are links
+into `/data`, `aria2c` accepts 16 connections, and the build **fails** if any
 `*.safetensors`, `*.pth`, `*.ckpt`, `*.pt` or `*.gguf` over 1 MB has found its
-way in. Then it boots a dev run and drives an upload, a key and an export
+way in — or if torch has, since it is not supposed to be in the image at all. Then it boots a dev run and drives an upload, a key and an export
 through the HTTP API before anything is pushed.
 
 The image that passed those tests is the image that gets pushed — retagged,

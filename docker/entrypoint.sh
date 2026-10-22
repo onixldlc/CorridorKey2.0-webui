@@ -2,16 +2,20 @@
 # Prepares the data volume and starts the server.
 #
 # The keyer is baked into the image at /opt/corridorkey, cloned at build time
-# from this fork's `upstream` branch. Only the weights and the clips live in
-# the volume, so replacing the container costs nothing and a container start
-# is offline-safe: modules are fetched on request from the Modules page, never
-# from here.
+# from this fork's `upstream` branch. The weights, the clips and the inference
+# stack live in the volume, so replacing the container costs nothing and an
+# image upgrade does not re-download 3.3 GB of torch.
+#
+# A container start is still offline-safe once the volume is populated: the
+# bootstrap skips on a stamp match and the modules are only fetched when the
+# Modules page asks.
 set -eu
 
 ROOT="${CKWEB_ROOT:-/opt/corridorkey}"
 CLIPS="${CKWEB_CLIPS:-/data/ClipsForInference}"
 MODE="${CKWEB_MODE:-auto}"
-PY="${CKWEB_PYTHON:-/opt/venv/bin/python}"
+VENV="${CKWEB_VENV:-/data/venv}"
+PY="${CKWEB_PYTHON:-$VENV/bin/python}"
 
 # /opt/corridorkey/weights and /vfms are symlinks into /data; a freshly mounted
 # host directory has none of this, so make the targets before anything reads
@@ -30,16 +34,17 @@ if [ -z "${CKWEB_TOKEN:-}" ] && [ "$MODE" != "dev" ]; then
 fi
 
 if [ "$MODE" = "dev" ]; then
+	# A dev run drives the mock keyer, which needs no torch at all.
 	printf 'ck-web: dev run — mock keyer, downloads disabled\n'
 elif [ ! -f "$ROOT/infer.py" ]; then
 	printf 'ck-web: no infer.py at %s — the mock provider will be used.\n' "$ROOT"
 	printf '        Something has overmounted the runtime; CKWEB_ROOT must point at a checkout.\n'
-elif [ -x "$PY" ]; then
-	# Worth the few seconds it costs: "cuda False" printed here is the
-	# difference between a misconfigured --gpus flag and a mystery at the
-	# first job.
-	"$PY" -c 'import torch; print("ck-web: torch", torch.__version__, "- cuda", torch.cuda.is_available())' \
-		|| printf 'ck-web: torch did not import — the image is broken, please report it\n' >&2
+else
+	# Backgrounded so the page and the log are reachable immediately. On a
+	# volume that already has the stack this returns in about a second; on a
+	# fresh one it downloads 3.3 GB and the keyer reports itself not ready
+	# until it finishes.
+	/usr/local/bin/bootstrap.sh 2>&1 &
 fi
 
 exec /usr/local/bin/ck-web "$@"

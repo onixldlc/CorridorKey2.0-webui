@@ -29,3 +29,7 @@
 # Local / studio-specific files
 .env
 .claude/
+
+# Python bytecode, from running the wheel resolver locally.
+__pycache__/
+*.pyc

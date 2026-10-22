@@ -82,18 +82,6 @@ RUN rm -rf /var/lib/apt/lists/*
 
 COPY --from=cksrc /ck /opt/corridorkey
 
-RUN python3 -m venv /opt/venv
-
-RUN /opt/venv/bin/pip install --no-cache-dir --upgrade pip
-
-# The versions upstream pins. cu128 wheels carry their own CUDA libraries, so
-# the base image only has to provide the driver interface.
-RUN /opt/venv/bin/pip install --no-cache-dir \
-    torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} \
-    --index-url ${TORCH_INDEX_URL}
-
-RUN /opt/venv/bin/pip install --no-cache-dir -r /opt/corridorkey/requirements.txt
-
 COPY --from=build /out/ck-web /usr/local/bin/ck-web
 
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -106,6 +94,17 @@ COPY docker/onstart.sh /usr/local/bin/onstart.sh
 
 RUN chmod +x /usr/local/bin/onstart.sh
 
+# torch and its CUDA libraries are not baked in. They are 3.3 GB that would
+# otherwise be re-pulled for every release of this UI, in one unsplittable
+# layer, and thrown away with the container. bootstrap.sh puts them in the
+# volume instead, fetched with aria2c and kept across image upgrades — the
+# same bargain the weights already make.
+COPY docker/bootstrap.sh /usr/local/bin/bootstrap.sh
+
+COPY docker/wheels.py /usr/local/bin/wheels.py
+
+RUN chmod +x /usr/local/bin/bootstrap.sh /usr/local/bin/wheels.py
+
 # Rental consoles have a one-line field for this and no tab completion, so
 # both scripts answer to a short path at the root as well.
 RUN ln -s /usr/local/bin/entrypoint.sh /entrypoint.sh
@@ -115,7 +114,7 @@ RUN ln -s /usr/local/bin/onstart.sh /onstart.sh
 # The runtime reads its weights from <root>/weights and <root>/vfms, and those
 # are the only parts of the checkout that are written to. They are also the
 # 5.1 GB nobody wants to fetch twice, so they are symlinks into the volume.
-RUN mkdir -p /data/ClipsForInference /data/weights \
+RUN mkdir -p /data/ClipsForInference /data/weights /data/wheels \
     /data/vfms/cradio /data/vfms/moge /data/vfms/rvm
 
 RUN rm -rf /opt/corridorkey/weights /opt/corridorkey/vfms
@@ -133,7 +132,18 @@ ENV CKWEB_ROOT="/opt/corridorkey"
 
 ENV CKWEB_CLIPS="/data/ClipsForInference"
 
-ENV CKWEB_PYTHON="/opt/venv/bin/python"
+# The interpreter lives in the volume, built on first start by bootstrap.sh.
+ENV CKWEB_VENV="/data/venv"
+
+ENV CKWEB_PYTHON="/data/venv/bin/python"
+
+# Read by bootstrap.sh and wheels.py at run time, not at build time. The CUDA
+# pins are not listed anywhere: they are read from torch's own metadata.
+ENV TORCH_VERSION="${TORCH_VERSION}"
+
+ENV TORCHVISION_VERSION="${TORCHVISION_VERSION}"
+
+ENV TORCH_INDEX_URL="${TORCH_INDEX_URL}"
 
 ENV CKWEB_MODE="auto"
 
