@@ -75,8 +75,12 @@ RUN apt-get update
 # link, and ck-web shells out to aria2c for 16 connections per file.
 #
 # git is here for requirements.txt, which pulls utils3d from a git URL.
+#
+# openssh-server is here for the rented-box consoles whose shell launch mode
+# expects the image to provide sshd. Nothing in this image starts it; see
+# docker/onstart.sh.
 RUN apt-get install -y --no-install-recommends \
-    ca-certificates ffmpeg aria2 git python3 python3-venv
+    ca-certificates ffmpeg aria2 git python3 python3-venv openssh-server
 
 RUN rm -rf /var/lib/apt/lists/*
 
@@ -99,6 +103,18 @@ COPY --from=build /out/ck-web /usr/local/bin/ck-web
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# For launch modes that replace the entrypoint with a shell server, so the UI
+# can be started alongside it rather than instead of it.
+COPY docker/onstart.sh /usr/local/bin/onstart.sh
+
+RUN chmod +x /usr/local/bin/onstart.sh
+
+# Rental consoles have a one-line field for this and no tab completion, so
+# both scripts answer to a short path at the root as well.
+RUN ln -s /usr/local/bin/entrypoint.sh /entrypoint.sh
+
+RUN ln -s /usr/local/bin/onstart.sh /onstart.sh
 
 # The runtime reads its weights from <root>/weights and <root>/vfms, and those
 # are the only parts of the checkout that are written to. They are also the

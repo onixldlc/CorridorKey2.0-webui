@@ -127,8 +127,18 @@ docker run -d --name ck-web \
 ```
 
 `/data` is **not** a checkout — it holds your clips and the weights the Modules
-page installs, and that is all. Put it on a disk with 10 GB spare. Replacing
-or upgrading the container costs nothing, because nothing in it is yours.
+page installs, and that is all. Replacing or upgrading the container costs
+nothing, because nothing in it is yours.
+
+Budget the disk from what actually lands on it. The image unpacks to about
+9 GB. The weights are 5.08 GB — 2.54 for the keyer, 1.65 for C-RADIO, 0.40 for
+MoGe-2, 0.26 for RVM. Half-float EXR output runs about 20 MB per frame across
+the four stages, so the rest is yours: 40 GB leaves roughly 24 GiB of working
+room, near a thousand frames. Under 20 GB the image and the weights alone do
+not both fit.
+
+Mind the unit: disk fields on rental consoles are decimal GB and `df` reports
+GiB, so a 40 GB disk is 37.3 GiB.
 
 ```
 /opt/corridorkey/      the keyer, from the upstream branch (in the image)
@@ -155,6 +165,50 @@ ssh -L 8080:localhost:8080 user@gpu-box
 Open that link through the tunnel; the token is remembered in `localStorage`.
 Land on the page without it and you get an in-page prompt rather than a blank
 screen.
+
+### On a console that will not run the entrypoint
+
+Rented-box consoles offer launch modes, and the shell ones replace the image
+entrypoint with their own SSH server. Pick one of those and the UI never
+starts. The image ships `onstart.sh` for exactly that case: point the
+console's on-start script at it and you get both.
+
+```
+/onstart.sh
+```
+
+That is a symlink to `/usr/local/bin/onstart.sh`; `/entrypoint.sh` is one to
+the real entrypoint, for the same reason — a console on-start field is typed
+by hand. Use `/onstart.sh` there, not `/entrypoint.sh`: the entrypoint execs
+the server in the foreground and never returns, so the token never gets read
+back out of the log and no login banner is written.
+
+It backgrounds the real entrypoint, so the volume is still seeded and the
+pinned keyer revision and the `torch ... cuda True` line still appear — in
+`/var/log/ck-web.log` rather than the container log. It then waits for the
+token, and writes a login banner that prints the externally reachable URL,
+because the link the server logs says `localhost` and the console publishes
+8080 on some other port.
+
+On Vast.ai specifically, with `-p 8080:8080` in the docker options:
+
+| Field | Value |
+| --- | --- |
+| Image Path:Tag | `ghcr.io/onixldlc/corridorkey2-webui` |
+| Launch mode | Interactive shell server, SSH |
+| On-start script | `/onstart.sh` |
+| Environment | `CKWEB_TOKEN=auto`, `CKWEB_MODE=auto` |
+| Container disk | 40 GB |
+| Extra filters | `verified=true compute_cap>=800 cuda_vers>=12.8 gpu_ram>=12 disk_space>=40 inet_down>=400` |
+
+Those are floors, not targets. `compute_cap>=800` is the Ampere line, which is
+what "RTX 30-series or newer" means to the filter, and `gpu_ram>=12` puts an
+RTX 3060 — usually the cheapest card that can run this at all — at the bottom
+of the list without hiding anything larger. On 12 GB, turn on Low VRAM in the
+key panel; it trades speed for fitting in the card.
+
+`openssh-server` is in the image so those modes have an sshd to start; nothing
+in the image starts it itself.
 
 ## The weights
 
