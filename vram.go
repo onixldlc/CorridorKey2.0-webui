@@ -273,41 +273,51 @@ func ffprobeBin() string {
 	return filepath.Join(dir, strings.Replace(base, "ffmpeg", "ffprobe", 1))
 }
 
-// probePlate reads the plate's size and length. The frame count only matters
-// for clips shorter than one window, so a duration times a frame rate is
-// accurate enough and costs one read of the header rather than a decode.
-func probePlate(path string) (w, h, frames int, err error) {
+// plateInfo is what one read of a plate's header tells us.
+type plateInfo struct {
+	W, H   int
+	Frames int     // 0 when the container does not say
+	FPS    float64 // 0 when the container does not say
+}
+
+// probePlate reads the plate's size, length and frame rate. The frame count
+// only matters for clips shorter than one window, so a duration times a frame
+// rate is accurate enough and costs one read of the header rather than a
+// decode.
+func probePlate(path string) (plateInfo, error) {
 	out, err := exec.Command(ffprobeBin(), "-v", "error",
 		"-select_streams", "v:0",
 		"-show_entries", "stream=width,height,nb_frames,avg_frame_rate,duration",
 		"-of", "default=noprint_wrappers=1", path).Output()
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("could not probe %s: %w", filepath.Base(path), err)
+		return plateInfo{}, fmt.Errorf("could not probe %s: %w", filepath.Base(path), err)
 	}
-	w, h, frames = parseProbe(string(out))
-	if w == 0 || h == 0 {
-		return 0, 0, 0, fmt.Errorf("%s reports no video stream size", filepath.Base(path))
+	info := parseProbe(string(out))
+	if info.W == 0 || info.H == 0 {
+		return plateInfo{}, fmt.Errorf("%s reports no video stream size", filepath.Base(path))
 	}
-	return w, h, frames, nil
+	return info, nil
 }
 
 // parseProbe reads ffprobe default output. nb_frames is "N/A" on plenty of
 // containers, so a duration times a frame rate stands in for it.
-func parseProbe(out string) (w, h, frames int) {
+func parseProbe(out string) plateInfo {
 	fields := map[string]string{}
 	for _, line := range strings.Split(out, "\n") {
 		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
 			fields[k] = v
 		}
 	}
-	w, _ = strconv.Atoi(fields["width"])
-	h, _ = strconv.Atoi(fields["height"])
-	frames, _ = strconv.Atoi(fields["nb_frames"])
-	if frames == 0 {
+	var info plateInfo
+	info.W, _ = strconv.Atoi(fields["width"])
+	info.H, _ = strconv.Atoi(fields["height"])
+	info.FPS = parseRate(fields["avg_frame_rate"])
+	info.Frames, _ = strconv.Atoi(fields["nb_frames"])
+	if info.Frames == 0 {
 		dur, _ := strconv.ParseFloat(fields["duration"], 64)
-		frames = int(dur * parseRate(fields["avg_frame_rate"]))
+		info.Frames = int(dur * info.FPS)
 	}
-	return w, h, frames
+	return info
 }
 
 // parseRate reads ffprobe's "25/1" rational frame rate.

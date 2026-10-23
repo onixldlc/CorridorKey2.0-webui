@@ -11,7 +11,8 @@ const state = {
   modules: [],
   providers: [],
   selected: null,   // clip name
-  view: "comp",     // viewer tab
+  view: "matte",    // viewer tab
+  bg: "checker",    // what the preview composites over
   frames: [],       // frame names of the current view
   frame: 0,
   job: null,        // job id shown in the console
@@ -117,7 +118,10 @@ function syncDockToProvider(id) {
 }
 
 function wireDock() {
-  $("#p-despill").addEventListener("input", (e) => ($("#p-despill-v").textContent = e.target.value));
+  $("#p-despill").addEventListener("input", (e) => {
+    $("#p-despill-v").textContent = e.target.value;
+    if (state.page === "viewer" && state.view === "comp") render();
+  });
   $("#p-gamma").addEventListener("click", (e) => {
     const on = e.target.dataset.on !== "true";
     e.target.dataset.on = String(on);
@@ -227,11 +231,13 @@ const TITLES = {
   about: ["ASSETS", "About"],
 };
 
+// A hint is optional in 2.0, so a clip with nothing but a plate is already
+// keyable — the stage names still come from the older pipeline.
 const STAGES = {
-  "needs-alpha": ["badge-warn", "needs alpha"],
-  ready: ["badge-accent", "ready to key"],
+  "needs-alpha": ["badge-accent", "ready to key"],
+  ready: ["badge-accent", "ready · hint"],
   keyed: ["badge-good", "keyed"],
-  empty: ["badge-bad", "no input"],
+  empty: ["badge-bad", "no plate"],
 };
 
 function render() {
@@ -274,7 +280,7 @@ function renderClips(body) {
     tile.innerHTML = `
       <div class="thumb">
         ${thumbView
-          ? `<img loading="lazy" src="${withToken(`/api/clips/${encodeURIComponent(c.name)}/frame?view=${thumbView}&i=0`)}" alt="">`
+          ? `<img loading="lazy" src="${frameSrc(c.name, thumbView, 0, state.bg)}" alt="">`
           : `<span class="empty hud-label">no preview</span>`}
         <div class="corner"><span class="badge ${cls}">${label}</span></div>
         ${c.running ? '<div class="spin"></div>' : ""}
@@ -284,7 +290,7 @@ function renderClips(body) {
         <span class="line">
           <span class="hud-label">${esc(c.input || "—")}</span>
           ${c.alpha > 0 ? `<span class="hud-label">· ${c.alpha} hint</span>` : ""}
-          ${c.frames > 0 ? `<span class="hud-label">· ${c.frames} keyed</span>` : ""}
+          ${c.frames > 0 ? `<span class="hud-label">· ${c.frames} matte</span>` : ""}
         </span>
       </div>
       <div class="acts">
@@ -296,7 +302,7 @@ function renderClips(body) {
       if (act === "del") return delClip(c.name);
       state.selected = c.name;
       if (act === "open") {
-        state.view = c.stage === "keyed" ? "comp" : c.alpha > 0 ? "alpha" : "input";
+        state.view = c.stage === "keyed" ? "matte" : c.alpha > 0 ? "hint" : "plate";
         state.frame = 0;
         return go("viewer");
       }
@@ -374,14 +380,34 @@ async function delClip(name) {
   }
 }
 
+// What this UI deals in: the plate that went in, the rough mask that went in
+// with it, the refined matte that came out, and a preview of the three
+// together. Nothing else — CorridorKey is a keyer, not a compositor.
 const VIEWS = [
-  ["input", "Plate"],
-  ["alpha", "Alpha hint"],
-  ["comp", "Comp"],
+  ["plate", "Plate"],
+  ["hint", "Hint"],
   ["matte", "Matte"],
-  ["fg", "FG"],
-  ["processed", "Processed"],
+  ["comp", "Preview"],
 ];
+
+const EMPTY_VIEW = {
+  plate: "No plate here yet — drop one on the Clips page.",
+  hint: "No rough mask uploaded for this clip.",
+  matte: "No matte yet.",
+  comp: "No matte yet, so there is nothing to composite.",
+};
+
+const BACKGROUNDS = ["checker", "black", "white", "grey", "green", "magenta"];
+
+// frameSrc is the URL of one frame of the current view. The preview carries
+// the background with it, because the server renders it rather than reading it.
+function frameSrc(clip, view, i, bg) {
+  // Despill belongs to the preview now: the matte does not depend on it, so
+  // the server applies the slider here rather than passing it to infer.py.
+  const q = `view=${view}&i=${i}`
+    + (view === "comp" ? `&bg=${bg}&despill=${$("#p-despill") ? $("#p-despill").value : 5}` : "");
+  return withToken(`/api/clips/${encodeURIComponent(clip)}/frame?${q}`);
+}
 
 function renderViewer(body) {
   if (!state.selected) {
@@ -409,19 +435,40 @@ function renderViewer(body) {
   const sp = document.createElement("div");
   sp.style.flex = "1";
   bar.append(sp);
-  bar.insertAdjacentHTML("beforeend", `
-    <a class="btn btn-mono" href="${withToken(`/api/clips/${encodeURIComponent(state.selected)}/export?view=${state.view}&format=mov`)}">Export ProRes 4444</a>
-    <a class="btn btn-mono" href="${withToken(`/api/clips/${encodeURIComponent(state.selected)}/export?view=${state.view}&format=mp4`)}">Export H.264</a>`);
+  const exp = (format) => withToken(`/api/clips/${encodeURIComponent(state.selected)}/export?view=${state.view}&format=${format}`
+    + (state.view === "comp" ? `&bg=${state.bg}&despill=${$("#p-despill").value}` : ""));
+  bar.insertAdjacentHTML("beforeend", state.view === "comp"
+    ? `<a class="btn btn-mono" href="${exp("mp4")}">Export H.264</a>`
+    : `<a class="btn btn-mono" href="${exp("mov")}">Export ProRes 4444</a>
+       <a class="btn btn-mono" href="${exp("mp4")}">Export H.264</a>`);
   wrap.append(bar);
+
+  if (state.view === "comp") {
+    const bgs = document.createElement("div");
+    bgs.className = "view-bar";
+    bgs.insertAdjacentHTML("beforeend", `<span class="hud-label">Background</span>`);
+    for (const name of BACKGROUNDS) {
+      const b = document.createElement("button");
+      b.className = "tab" + (state.bg === name ? " on" : "");
+      b.textContent = name;
+      b.addEventListener("click", () => {
+        state.bg = name;
+        render();
+      });
+      bgs.append(b);
+    }
+    wrap.append(bgs);
+  }
 
   const stage = document.createElement("div");
   stage.className = "stage";
-  if (state.view === "input" && clip.input && !clip.input.endsWith("/")) {
+  if (state.view === "plate" && clip.input && !clip.input.endsWith("/")) {
     stage.innerHTML = `<video controls preload="metadata" src="${withToken(`/api/clips/${encodeURIComponent(state.selected)}/input`)}"></video>`;
   } else if (state.frames.length) {
-    stage.innerHTML = `<img src="${withToken(`/api/clips/${encodeURIComponent(state.selected)}/frame?view=${state.view}&i=${state.frame}`)}" alt="">`;
+    stage.innerHTML = `<img src="${frameSrc(state.selected, state.view, state.frame, state.bg)}" alt="">`;
   } else {
-    stage.innerHTML = `<div class="empty">Nothing in <b>${state.view}</b> yet.<br><span class="hud-label">run the step that writes it</span></div>`;
+    stage.innerHTML = `<div class="empty">${esc(EMPTY_VIEW[state.view] || `Nothing in ${state.view} yet.`)}<br>
+      <span class="hud-label">${state.view === "hint" ? "a hint is optional" : "key the clip to fill this"}</span></div>`;
   }
   wrap.append(stage);
 
@@ -437,7 +484,7 @@ function renderViewer(body) {
       state.frame = Number(range.value);
       scrub.querySelector(".frame-no").textContent = `${state.frame + 1} / ${state.frames.length}`;
       const img = stage.querySelector("img");
-      if (img) img.src = withToken(`/api/clips/${encodeURIComponent(state.selected)}/frame?view=${state.view}&i=${state.frame}`);
+      if (img) img.src = frameSrc(state.selected, state.view, state.frame, state.bg);
     });
     wrap.append(scrub);
   }

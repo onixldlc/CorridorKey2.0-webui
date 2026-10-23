@@ -129,7 +129,10 @@ func (m MockProvider) alphas(ctx context.Context, clip string, log func(string))
 	return nil
 }
 
-// key writes Comp, Matte, FG and Processed, as the real provider does.
+// key writes a matte, and only a matte, because that is all the real provider
+// asks the runtime for. The preview the viewer shows over a checkerboard is
+// composited from this and the plate on request, the same way it is for a real
+// key, so a dev run exercises the same path.
 func (m MockProvider) key(ctx context.Context, clip string, p Params, log func(string)) error {
 	frames, cleanup, err := m.plate(ctx, clip, log)
 	if err != nil {
@@ -137,17 +140,12 @@ func (m MockProvider) key(ctx context.Context, clip string, p Params, log func(s
 	}
 	defer cleanup()
 
-	root := filepath.Join(cfg.ClipsDir, clip, "Output")
-	dirs := map[string]string{}
-	for _, name := range []string{"Comp", "Matte", "FG", "Processed"} {
-		d := filepath.Join(root, name)
-		if err := os.MkdirAll(d, 0o775); err != nil {
-			return err
-		}
-		dirs[name] = d
+	matteDir := filepath.Join(cfg.ClipsDir, clip, "Output", "Matte")
+	if err := os.MkdirAll(matteDir, 0o775); err != nil {
+		return err
 	}
-	log(fmt.Sprintf("Running mock inference on: %s — %d frames, despill %d/10, refiner %.2f",
-		clip, len(frames), p.Despill, p.Refiner))
+	log(fmt.Sprintf("Running mock inference on: %s — %d frames, refiner %.2f",
+		clip, len(frames), p.Refiner))
 
 	for i, f := range frames {
 		if err := ctx.Err(); err != nil {
@@ -157,24 +155,12 @@ func (m MockProvider) key(ctx context.Context, clip string, p Params, log func(s
 		if err != nil {
 			return err
 		}
-		strength := float64(clampInt(p.Despill, 0, 10)) / 10.0
 		matte := greenExcess(src, 1.0+p.Refiner)
 		if p.Despeckle {
 			despeckle(matte, p.SpeckSize)
 		}
-		fg := despill(src, matte, strength)
 		stem := fmt.Sprintf("%s_%04d", clip, i)
-
-		if err := savePNG(filepath.Join(dirs["Matte"], stem+".png"), matte); err != nil {
-			return err
-		}
-		if err := savePNG(filepath.Join(dirs["FG"], stem+".png"), fg); err != nil {
-			return err
-		}
-		if err := savePNG(filepath.Join(dirs["Comp"], stem+".png"), over(fg, matte)); err != nil {
-			return err
-		}
-		if err := savePNG(filepath.Join(dirs["Processed"], stem+".png"), rgba(fg, matte)); err != nil {
+		if err := savePNG(filepath.Join(matteDir, stem+".png"), matte); err != nil {
 			return err
 		}
 		if i%10 == 0 || i == len(frames)-1 {
@@ -264,61 +250,6 @@ func greenExcess(src image.Image, gain float64) *image.Gray {
 			spill := (gf - math.Max(rf, bf)) * 2.2 * gain
 			a := 255.0 - clamp(spill, 0, 255)
 			out.SetGray(x, y, color.Gray{Y: uint8(a)})
-		}
-	}
-	return out
-}
-
-// despill removes the green cast the screen threw onto the subject.
-func despill(src image.Image, matte *image.Gray, strength float64) *image.RGBA {
-	b := src.Bounds()
-	out := image.NewRGBA(b)
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			r, g, bl, _ := src.At(x, y).RGBA()
-			rf, gf, bf := float64(r>>8), float64(g>>8), float64(bl>>8)
-			cap_ := math.Max(rf, bf)
-			if gf > cap_ {
-				gf -= (gf - cap_) * strength
-			}
-			out.Set(x, y, color.RGBA{uint8(clamp(rf, 0, 255)), uint8(clamp(gf, 0, 255)), uint8(clamp(bf, 0, 255)), 255})
-		}
-	}
-	return out
-}
-
-// over composites the foreground onto a checkerboard, as the real Comp pass
-// writes a reference comp.
-func over(fg *image.RGBA, matte *image.Gray) *image.RGBA {
-	b := fg.Bounds()
-	out := image.NewRGBA(b)
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			a := float64(matte.GrayAt(x, y).Y) / 255
-			c := fg.RGBAAt(x, y)
-			var bg float64 = 40
-			if ((x/16)+(y/16))%2 == 0 {
-				bg = 64
-			}
-			out.Set(x, y, color.RGBA{
-				uint8(float64(c.R)*a + bg*(1-a)),
-				uint8(float64(c.G)*a + bg*(1-a)),
-				uint8(float64(c.B)*a + bg*(1-a)),
-				255,
-			})
-		}
-	}
-	return out
-}
-
-func rgba(fg *image.RGBA, matte *image.Gray) *image.RGBA {
-	b := fg.Bounds()
-	out := image.NewRGBA(b)
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			c := fg.RGBAAt(x, y)
-			c.A = matte.GrayAt(x, y).Y
-			out.SetRGBA(x, y, c)
 		}
 	}
 	return out

@@ -17,7 +17,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -62,14 +61,11 @@ func (CorridorKey2Provider) Ready() (bool, string) {
 	return true, "infer.py, the weights and a GPU are all present"
 }
 
-// ck2Views maps infer.py's outputs onto the four stages the viewer knows.
-// runtime.py appends these to the clip name; checker carries the despill
-// strength in its own suffix, so that one is matched on the stem.
+// ck2Views maps infer.py's output onto what the viewer reads. There is one
+// entry because there is one output: runtime.py appends _alpha_exr to the
+// clip name, and that folder is the matte.
 var ck2Views = []struct{ suffix, stage string }{
 	{"_alpha_exr", "Matte"},
-	{"_fg_exr", "FG"},
-	{"_cutout_exr", "Processed"},
-	{"_checker_comp_despill", "Comp"}, // the number and _exr follow
 }
 
 func (CorridorKey2Provider) Run(ctx context.Context, action, clip string, p Params, log func(string)) error {
@@ -115,14 +111,15 @@ func (CorridorKey2Provider) Run(ctx context.Context, action, clip string, p Para
 		"infer.py",
 		"--input", input,
 		"--output_dir", stage,
-		// All four, so every stage the viewer offers has frames behind it.
-		"--outputs", "alpha", "fg", "checker", "cutout",
+		// The matte, and nothing else. fg, cutout and the checkerboard comp are
+		// three more EXR sequences and more GPU time for pictures this UI does
+		// not deliver — it renders a comp from the plate and the matte instead.
+		"--outputs", "alpha",
 		// EXR keeps the matte and the foreground unclamped and scene-linear.
 		// The preview encode would throw that away, which is the whole reason
 		// to run this rather than the drag-and-drop launcher.
 		"--output_format", "exr",
 		"--exr_dtype", "half",
-		"--despill_strength", strconv.FormatFloat(p.despillStrength(), 'f', 2, 64),
 		"--ffmpeg_bin", cfg.FFmpeg,
 		"--temp_dir", tmp,
 	}
@@ -166,9 +163,9 @@ func (CorridorKey2Provider) Run(ctx context.Context, action, clip string, p Para
 	return ck2Collect(stage, dir, log)
 }
 
-// ck2Collect sorts infer.py's output folders into Output/<stage>/. Comp is
-// transcoded to PNG on the way, because that is what the clip scanner counts
-// and what the grid tiles load.
+// ck2Collect moves infer.py's output folder to Output/Matte. It is written as
+// a loop over ck2Views because the mapping, not the count, is the point: if a
+// later runtime grows another output worth keeping, it is one line here.
 func ck2Collect(stage, dir string, log func(string)) error {
 	entries, err := os.ReadDir(stage)
 	if err != nil {
@@ -181,14 +178,7 @@ func ck2Collect(stage, dir string, log func(string)) error {
 			if !e.IsDir() {
 				continue
 			}
-			name := e.Name()
-			if v.suffix == "_checker_comp_despill" {
-				if strings.Contains(name, v.suffix) && strings.HasSuffix(name, "_exr") {
-					src = filepath.Join(stage, name)
-				}
-				continue
-			}
-			if strings.HasSuffix(name, v.suffix) {
+			if name := e.Name(); strings.HasSuffix(name, v.suffix) {
 				src = filepath.Join(stage, name)
 			}
 		}
@@ -199,13 +189,6 @@ func ck2Collect(stage, dir string, log func(string)) error {
 		dst := filepath.Join(dir, "Output", v.stage)
 		if err := os.RemoveAll(dst); err != nil {
 			return err
-		}
-		if v.stage == "Comp" {
-			if err := ck2CompToPNG(src, dst, log); err != nil {
-				return err
-			}
-			moved++
-			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o775); err != nil {
 			return err
@@ -221,39 +204,6 @@ func ck2Collect(stage, dir string, log func(string)) error {
 	}
 	_ = os.RemoveAll(stage) // staging only; anything left is debris
 	return nil
-}
-
-// ck2CompToPNG renders the checkerboard comp to 8-bit PNG with the same
-// transfer the viewer applies to any other scene-linear EXR.
-func ck2CompToPNG(src, dst string, log func(string)) error {
-	if err := os.MkdirAll(dst, 0o775); err != nil {
-		return err
-	}
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return err
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".exr") {
-			names = append(names, e.Name())
-		}
-	}
-	sort.Strings(names)
-	if len(names) == 0 {
-		return fmt.Errorf("no EXR frames in %s", src)
-	}
-	for i, n := range names {
-		out := filepath.Join(dst, fmt.Sprintf("%05d.png", i))
-		cmd := exec.Command(cfg.FFmpeg, "-v", "error", "-y", "-i", filepath.Join(src, n),
-			"-vf", "scale=in_color_matrix=bt709:out_color_matrix=bt709,format=rgb24",
-			"-frames:v", "1", out)
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("comp frame %s would not convert to png: %w", n, err)
-		}
-	}
-	log(fmt.Sprintf("Comp ← %d frames transcoded to png", len(names)))
-	return os.RemoveAll(src)
 }
 
 // findInput locates the uploaded plate inside a clip folder.
@@ -282,11 +232,12 @@ func ck2Fit(ctx context.Context, dir, input string, p Params, log func(string)) 
 		log("could not read free VRAM from nvidia-smi — leaving the window to the runtime")
 		return input, VRAMPlan{}, nil
 	}
-	w, h, frames, err := probePlate(input)
+	info, err := probePlate(input)
 	if err != nil {
 		log(err.Error() + " — leaving the window to the runtime")
 		return input, VRAMPlan{}, nil
 	}
+	w, h, frames := info.W, info.H, info.Frames
 
 	plan := planVRAM(w, h, frames, budget)
 	log("VRAM: " + plan.Summary())

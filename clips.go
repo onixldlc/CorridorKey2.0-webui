@@ -92,12 +92,13 @@ func inspectClip(name string) Clip {
 		c.Stage = StageReady
 	}
 
-	c.Frames = countFiles(filepath.Join(dir, "Output", "Comp"), map[string]bool{".png": true})
+	// The matte is the deliverable, so it is also what "keyed" means now.
+	c.Frames = countFiles(filepath.Join(dir, "Output", "Matte"), imageExt)
 	if c.Frames > 0 {
 		c.Stage = StageKeyed
-		c.Preview = "comp"
+		c.Preview = "matte"
 	} else if c.Alpha > 0 {
-		c.Preview = "alpha"
+		c.Preview = "hint"
 	}
 	c.Running = queue.isRunning(name)
 	return c
@@ -185,24 +186,24 @@ func frameList(clip, view string) ([]string, string) {
 	return names, dir
 }
 
-// viewDir maps a UI view name to the folder clip_manager.py writes it to.
+// viewDir maps a UI view name to a folder of frames. There are three of them
+// now — the plate, the hint that went in, the matte that came out — because
+// those are the only three things this UI deals in. "comp" is not here: it is
+// rendered on request from the plate and the matte, and nothing writes it.
+//
+// The old names are still accepted so a page left open on an older build does
+// not start asking for folders that no longer mean anything.
 func viewDir(clip, view string) string {
 	base := filepath.Join(cfg.ClipsDir, clip)
 	switch view {
-	case "comp":
-		return filepath.Join(base, "Output", "Comp")
 	case "matte":
 		return filepath.Join(base, "Output", "Matte")
-	case "fg":
-		return filepath.Join(base, "Output", "FG")
-	case "processed":
-		return filepath.Join(base, "Output", "Processed")
-	case "alpha":
+	case "hint", "alpha":
 		if st, err := os.Stat(filepath.Join(base, "AlphaHint")); err == nil && st.IsDir() {
 			return filepath.Join(base, "AlphaHint")
 		}
 		return filepath.Join(base, "alphahint")
-	case "input":
+	case "plate", "input":
 		return filepath.Join(base, "Input")
 	}
 	return ""

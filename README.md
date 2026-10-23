@@ -9,7 +9,7 @@ is not yours.**
 This is one job, done properly:
 
 ```
-video in  →  green screen removed  →  video out
+plate in (+ an optional rough mask)  →  refined matte out
 ```
 
 That is the whole scope. **It is not trying to be another compositor.** There
@@ -320,8 +320,9 @@ falls back to a single-stream Go downloader and the Modules page says so.
 - Optional hint upload — first-frame matte or a full hint video
 - Live log streaming over SSE while a job runs, with cancel, and a progress
   bar that follows the key through its four phases
-- A viewer for every output — comp, matte, foreground, cutout — with a frame
-  scrubber, EXR converted to PNG on the fly
+- A viewer with four tabs and a frame scrubber — the plate, the rough mask
+  that went in with it, the refined matte, and a preview of the subject over a
+  checkerboard or a flat colour — with EXR converted to PNG on the fly
 - Export any stage as ProRes 4444 with the alpha intact, or H.264
 - A Modules page that installs, reports and removes weights at runtime
 
@@ -397,19 +398,43 @@ than as a job change, so the console keeps the scroll position you left it at.
 A killed run’s scratch is cleared at the start of the next one; a clean run
 removes its own.
 
-### How the outputs map
+### One output, and a preview of it
 
-`infer.py` is run with `--output_format exr` and all four outputs, which keeps
-the matte and the foreground unclamped and scene-linear — the reason to use
-this rather than the preview encode. Its folders are then sorted into the
-layout the viewer reads:
+`infer.py` is run with `--outputs alpha --output_format exr`: the matte, and
+nothing else. It can also render a foreground, a cutout and a checkerboard
+comp, and earlier versions of this UI asked for all four — three extra EXR
+sequences per clip, more GPU time, and pictures nobody delivers. EXR keeps the
+matte unclamped and scene-linear, which is the reason to run this rather than
+the drag-and-drop launcher.
 
-| infer.py | Shown as |
-|---|---|
-| `*_alpha_exr/` | Matte |
-| `*_fg_exr/` | FG |
-| `*_cutout_exr/` | Processed |
-| `*_checker_comp_despill*_exr/` | Comp, transcoded to PNG |
+| infer.py | Shown as | Where it comes from |
+|---|---|---|
+| `*_alpha_exr/` | Matte | moved to `Output/Matte/` |
+| — | Plate | the file you uploaded |
+| — | Hint | `AlphaHint/`, if you uploaded one |
+| — | Preview | rendered on request, never written |
+
+The preview is the one piece of composition here, and it is built in Go rather
+than asked of the model: ffmpeg hands over the plate frame and the matte frame
+as PNG, and `comp.go` blends them over a checkerboard, black, white, grey,
+green or magenta. The plate is scaled to the matte, not the other way around —
+a plate that was resized to fit the card produced a smaller matte, and the
+matte is the thing being judged. Nothing lands on disk, and the scrubber
+re-renders as you drag.
+
+The **Despill** slider moved with it. Upstream applies despill to the
+foreground and to its own comp, never to the matte, so with `--outputs alpha`
+the flag changed nothing on disk and is no longer passed to `infer.py`. The
+slider now drives the preview instead, with the same arithmetic transcribed
+from `_despill_average_srgb_torch`: the green above the mean of red and blue is
+spill, and half of it goes back to the other two channels.
+
+**Export** gives the matte as ProRes 4444 or H.264, and the preview as H.264
+over whichever background is selected. The export is one ffmpeg run —
+`alphamerge` + `overlay`, with the despill as a `geq` — not six hundred round
+trips through Go. Both paths were checked against each other on a flat
+`0x33cc33` plate: the preview returns `(129, 51, 126)` at full despill and the
+export `(126, 50, 124)`, the difference being h264.
 
 ## Flags
 

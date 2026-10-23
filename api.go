@@ -136,8 +136,10 @@ func handleClipRoutes(w http.ResponseWriter, r *http.Request) {
 		j := queue.Submit("run_inference", name, p)
 		writeJSON(w, j)
 	case verb == "frames" && r.Method == http.MethodGet:
-		view := q(r, "view", "comp")
-		names, _ := frameList(name, view)
+		view := q(r, "view", "matte")
+		// A comp has as many frames as the matte it is made from, since that
+		// is the sequence it is rendered against.
+		names, _ := frameList(name, compSource(view))
 		if names == nil {
 			names = []string{}
 		}
@@ -161,7 +163,19 @@ func handleClipRoutes(w http.ResponseWriter, r *http.Request) {
 // serveFrame sends one frame of one view. PNGs go out as they are; EXRs are
 // converted on the fly, because browsers cannot show them.
 func serveFrame(w http.ResponseWriter, r *http.Request, clip string) {
-	view := q(r, "view", "comp")
+	view := q(r, "view", "matte")
+	if view == "comp" {
+		idx, _ := strconv.Atoi(q(r, "i", "0"))
+		out, err := compositeFrame(clip, idx, q(r, "bg", "checker"), despillOf(r))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(out)
+		return
+	}
 	names, dir := frameList(clip, view)
 	if len(names) == 0 {
 		http.Error(w, "no frames in "+view, http.StatusNotFound)
@@ -177,16 +191,12 @@ func serveFrame(w http.ResponseWriter, r *http.Request, clip string) {
 	path := filepath.Join(dir, names[idx])
 
 	if strings.EqualFold(filepath.Ext(path), ".exr") {
-		w.Header().Set("Content-Type", "image/png")
-		// Linear EXR to sRGB PNG; a matte is single-channel, so greyscale it.
-		cmd := exec.Command(cfg.FFmpeg, "-v", "error", "-i", path,
-			"-vf", "scale=in_color_matrix=bt709:out_color_matrix=bt709,format=rgb24",
-			"-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-")
-		out, err := cmd.Output()
+		out, err := frameAsPNG(path, 0, 0)
 		if err != nil {
-			http.Error(w, "exr conversion failed (is ffmpeg built with OpenEXR?): "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		w.Header().Set("Content-Type", "image/png")
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(out)
 		return
@@ -198,8 +208,12 @@ func serveFrame(w http.ResponseWriter, r *http.Request, clip string) {
 // serveExport stitches a view's frames into a download. ProRes 4444 carries
 // the alpha; h264 is for a quick look.
 func serveExport(w http.ResponseWriter, r *http.Request, clip string) {
-	view := q(r, "view", "comp")
+	view := q(r, "view", "matte")
 	format := q(r, "format", "mp4")
+	if view == "comp" {
+		serveCompExport(w, r, clip)
+		return
+	}
 	names, dir := frameList(clip, view)
 	if len(names) == 0 {
 		http.Error(w, "no frames in "+view, http.StatusNotFound)

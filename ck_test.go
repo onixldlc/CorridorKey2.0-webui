@@ -1,6 +1,7 @@
 package main
 
 import (
+	"image/color"
 	"math"
 	"os"
 	"path/filepath"
@@ -453,22 +454,137 @@ func TestSparseFillMeasuresWhatIsWritten(t *testing.T) {
 // and a matroska file that answers N/A to both the frame count and the
 // duration. The second is why a missing frame count cannot be an error.
 func TestParseProbeReadsRealFfprobeOutput(t *testing.T) {
-	w, h, frames := parseProbe("width=3840\nheight=2160\navg_frame_rate=25/1\n" +
+	info := parseProbe("width=3840\nheight=2160\navg_frame_rate=25/1\n" +
 		"duration=2.000000\nnb_frames=50\n")
-	if w != 3840 || h != 2160 || frames != 50 {
-		t.Errorf("mp4 read as %dx%d, %d frames", w, h, frames)
+	if info.W != 3840 || info.H != 2160 || info.Frames != 50 || info.FPS != 25 {
+		t.Errorf("mp4 read as %dx%d, %d frames at %v fps", info.W, info.H, info.Frames, info.FPS)
 	}
 
-	w, h, frames = parseProbe("width=1920\nheight=1080\navg_frame_rate=24/1\n" +
+	info = parseProbe("width=1920\nheight=1080\navg_frame_rate=24/1\n" +
 		"duration=N/A\nnb_frames=N/A\n")
-	if w != 1920 || h != 1080 {
-		t.Errorf("mkv read as %dx%d", w, h)
+	if info.W != 1920 || info.H != 1080 {
+		t.Errorf("mkv read as %dx%d", info.W, info.H)
 	}
-	if frames != 0 {
-		t.Errorf("frame count is %d, want 0 — unknown, not invented", frames)
+	if info.Frames != 0 {
+		t.Errorf("frame count is %d, want 0 — unknown, not invented", info.Frames)
 	}
 	// Unknown length must still plan, as a clip longer than any window.
-	if p := planVRAM(w, h, frames, 23.3); !p.Fits || p.Frames != 80 {
+	if p := planVRAM(info.W, info.H, info.Frames, 23.3); !p.Fits || p.Frames != 80 {
 		t.Errorf("a clip of unknown length planned as %+v", p)
+	}
+}
+
+// TestEveryViewHasSomethingBehindIt — the viewer offers four tabs and three
+// of them are folders. The fourth is rendered, so it must NOT resolve to one,
+// or an empty directory would read as "no frames" instead of a comp.
+func TestEveryViewHasSomethingBehindIt(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cfg.ClipsDir = "/clips"
+	for _, view := range []string{"plate", "hint", "matte"} {
+		if viewDir("Shot_010", view) == "" {
+			t.Errorf("view %q maps to no folder", view)
+		}
+	}
+	if viewDir("Shot_010", "comp") != "" {
+		t.Error("the comp has a folder, but nothing writes one")
+	}
+	if got := compSource("comp"); got != "matte" {
+		t.Errorf("a comp counts %q frames, want the matte's", got)
+	}
+	if got := compSource("matte"); got != "matte" {
+		t.Errorf("compSource rewrote %q", got)
+	}
+	// The old names still have to answer: a page left open on v0.1.6 asks for
+	// them, and a dead tab is worse than a stale one.
+	if viewDir("Shot_010", "alpha") != viewDir("Shot_010", "hint") {
+		t.Error("the old alpha view no longer finds the hint folder")
+	}
+	if viewDir("Shot_010", "input") != viewDir("Shot_010", "plate") {
+		t.Error("the old input view no longer finds the plate folder")
+	}
+}
+
+// TestOnlyTheMatteIsAskedFor pins the argument that made three sequences and
+// a chunk of GPU time go away.
+func TestOnlyTheMatteIsAskedFor(t *testing.T) {
+	if len(ck2Views) != 1 || ck2Views[0].stage != "Matte" {
+		t.Fatalf("the collector handles %+v, want the matte alone", ck2Views)
+	}
+}
+
+// TestBackgroundsAreDrawn: the checkerboard has to alternate, and a flat
+// colour has to be flat. An unknown name falls back to the checker rather
+// than to a black frame that looks like a failed render.
+func TestBackgroundsAreDrawn(t *testing.T) {
+	ck := drawBackground(96, 96, "checker")
+	a := ck.NRGBAAt(0, 0)
+	b := ck.NRGBAAt(checkerSquare, 0)
+	if a == b {
+		t.Error("the checkerboard does not alternate across a square")
+	}
+	if got := ck.NRGBAAt(checkerSquare, checkerSquare); got != a {
+		t.Errorf("the diagonal square is %v, want the same as the first (%v)", got, a)
+	}
+	if got := drawBackground(8, 8, "green").NRGBAAt(4, 4); got != (color.NRGBA{0, 255, 0, 255}) {
+		t.Errorf("green is %v", got)
+	}
+	if got := drawBackground(8, 8, "nonsense").NRGBAAt(0, 0); got != a {
+		t.Errorf("an unknown background drew %v, want the checker", got)
+	}
+	for _, name := range backgroundNames() {
+		if name == "checker" {
+			continue
+		}
+		if _, ok := backgrounds[name]; !ok {
+			t.Errorf("the UI offers %q and the server cannot draw it", name)
+		}
+	}
+}
+
+// TestMixIsStraightAlpha — the comp is one line of arithmetic, and getting it
+// wrong looks like a bad matte rather than a bad blend.
+func TestMixIsStraightAlpha(t *testing.T) {
+	const fg, bg = 0xffff, 0x0000
+	if got := mix(fg, bg, 0xffff); got != 255 {
+		t.Errorf("full coverage gave %d, want the foreground", got)
+	}
+	if got := mix(fg, bg, 0); got != 0 {
+		t.Errorf("no coverage gave %d, want the background", got)
+	}
+	if got := mix(fg, bg, 0x8000); got < 126 || got > 130 {
+		t.Errorf("half coverage gave %d, want about 128", got)
+	}
+}
+
+// TestDespillMatchesUpstream — the preview's despill is a transcription of
+// runtime.py's _despill_average_srgb_torch, so it is pinned against the
+// arithmetic there: the green above the mean of red and blue is spill, and
+// half of it goes back to the other two channels.
+func TestDespillMatchesUpstream(t *testing.T) {
+	const r, g, b = 0.2, 0.8, 0.2 // spill of 0.6
+	gr, gg, gb := despillPixel(r, g, b, 1)
+	if math.Abs(gr-0.5) > 1e-9 || math.Abs(gg-0.2) > 1e-9 || math.Abs(gb-0.5) > 1e-9 {
+		t.Errorf("full despill gave (%.3f, %.3f, %.3f), want (0.5, 0.2, 0.5)", gr, gg, gb)
+	}
+	if hr, hg, hb := despillPixel(r, g, b, 0); hr != r || hg != g || hb != b {
+		t.Errorf("zero despill changed the pixel to (%.3f, %.3f, %.3f)", hr, hg, hb)
+	}
+	hr, hg, hb := despillPixel(r, g, b, 0.5)
+	if math.Abs(hr-0.35) > 1e-9 || math.Abs(hg-0.5) > 1e-9 || math.Abs(hb-0.35) > 1e-9 {
+		t.Errorf("half despill gave (%.3f, %.3f, %.3f), want (0.35, 0.5, 0.35)", hr, hg, hb)
+	}
+	// A pixel with no green excess must come back untouched at any strength.
+	if cr, cg, cb := despillPixel(0.9, 0.1, 0.9, 1); cr != 0.9 || cg != 0.1 || cb != 0.9 {
+		t.Errorf("a pixel with no spill was changed to (%.3f, %.3f, %.3f)", cr, cg, cb)
+	}
+
+	// The export does the same thing in ffmpeg, and must agree about zero.
+	if got := despillFilter(0); got != "" {
+		t.Errorf("zero despill still built a filter: %q", got)
+	}
+	if got := despillFilter(0.5); !strings.Contains(got, "geq=") ||
+		!strings.Contains(got, "max(g(X,Y)-(r(X,Y)+b(X,Y))/2,0)") {
+		t.Errorf("the export filter does not carry the same spill term: %q", got)
 	}
 }
