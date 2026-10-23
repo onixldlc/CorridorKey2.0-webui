@@ -35,8 +35,8 @@ type Module struct {
 	// sizes at the pinned revision, less whatever Exclude drops. It is only
 	// used to decide whether the box can provision itself without filling
 	// the volume, so it is an estimate, not a contract.
-	Need int64 `json:"need"`
-	Dest     string `json:"dest"` // relative to -root
+	Need int64  `json:"need"`
+	Dest string `json:"dest"` // relative to -root
 
 	// Exactly one of these describes what to fetch.
 	Repo  string   `json:"repo,omitempty"`  // a whole Hugging Face model repo
