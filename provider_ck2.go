@@ -87,6 +87,20 @@ func (CorridorKey2Provider) Run(ctx context.Context, action, clip string, p Para
 		return err
 	}
 
+	// Scratch of its own, under the clip, so the prepasses can be watched and
+	// so a killed run does not leave several GB in /tmp. The runtime removes
+	// its own memmaps on a clean exit; this clears what a kill left behind.
+	tmp := ck2TempDir(clip)
+	_ = os.RemoveAll(tmp)
+	if err := os.MkdirAll(tmp, 0o775); err != nil {
+		return err
+	}
+
+	input, plan, err := ck2Fit(ctx, dir, input, p, log)
+	if err != nil {
+		return err
+	}
+
 	// infer.py names its outputs after the input file, so it gets a staging
 	// folder and the results are sorted into Output/ once it exits clean.
 	stage := filepath.Join(dir, "Output", ".v2")
@@ -110,11 +124,23 @@ func (CorridorKey2Provider) Run(ctx context.Context, action, clip string, p Para
 		"--exr_dtype", "half",
 		"--despill_strength", strconv.FormatFloat(p.despillStrength(), 'f', 2, 64),
 		"--ffmpeg_bin", cfg.FFmpeg,
+		"--temp_dir", tmp,
+	}
+	// An explicit window turns the runtime's own sizing off, which is the
+	// point: ck2Fit already made that choice against a wider margin.
+	if plan.Chunk > 0 {
+		args = append(args, "--hann_chunk", strconv.Itoa(plan.Chunk),
+			"--hann_stride", strconv.Itoa(plan.Stride))
+		if plan.LowVram {
+			args = append(args, "--low_vram")
+		}
 	}
 	if p.HintQuality > 0 {
 		args = append(args, "--hint_quality", strconv.FormatFloat(p.HintQuality, 'f', 2, 64))
 	}
-	if p.LowVram {
+	if p.LowVram && !plan.LowVram {
+		// The toggle only ever adds staging; it cannot take it away, because
+		// the plan asked for it to fit the card at all.
 		args = append(args, "--low_vram")
 	}
 	if p.Linear {
@@ -136,6 +162,7 @@ func (CorridorKey2Provider) Run(ctx context.Context, action, clip string, p Para
 	if err := runLogged(cmd, log); err != nil {
 		return err
 	}
+	_ = os.RemoveAll(tmp)
 	return ck2Collect(stage, dir, log)
 }
 
@@ -244,4 +271,84 @@ func findInput(dir string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no Input.* plate in %s", dir)
+}
+
+// ck2Fit decides the Hann window this clip runs with, and resizes the plate
+// when not even a single-frame window fits the card. It returns the plate to
+// key, which is the original unless it had to be shrunk.
+func ck2Fit(ctx context.Context, dir, input string, p Params, log func(string)) (string, VRAMPlan, error) {
+	budget := gpuFreeGB()
+	if budget <= 0 {
+		log("could not read free VRAM from nvidia-smi — leaving the window to the runtime")
+		return input, VRAMPlan{}, nil
+	}
+	w, h, frames, err := probePlate(input)
+	if err != nil {
+		log(err.Error() + " — leaving the window to the runtime")
+		return input, VRAMPlan{}, nil
+	}
+
+	plan := planVRAM(w, h, frames, budget)
+	log("VRAM: " + plan.Summary())
+	if plan.Fits {
+		// A short window still keys the clip; it just holds the matte together
+		// over fewer frames, so it is worth knowing what a longer one costs.
+		if bw, bh := resolutionForWindow(w, h, frames, budget, 24); bw > 0 {
+			log(fmt.Sprintf("VRAM: a 24-frame window — steadier edges over time — "+
+				"would need the plate at %dx%d on this card", bw, bh))
+		}
+		return input, plan, nil
+	}
+	if plan.FitW == 0 {
+		return input, plan, fmt.Errorf("%dx%d will not fit in %.1f GB at any resolution", w, h, budget)
+	}
+	if !p.FitVRAM {
+		return input, plan, fmt.Errorf("this plate needs more VRAM than the card has free. "+
+			"Resize it to %dx%d and key that, or turn Fit to VRAM on and ck-web will resize it for you",
+			plan.FitW, plan.FitH)
+	}
+
+	small, err := ck2Downscale(ctx, dir, input, plan.FitW, plan.FitH, log)
+	if err != nil {
+		return input, plan, err
+	}
+	fitted := planVRAM(plan.FitW, plan.FitH, frames, budget)
+	log("VRAM: " + fitted.Summary())
+	if !fitted.Fits {
+		return input, plan, fmt.Errorf("even %dx%d does not fit — the card lost memory to something else mid-plan",
+			plan.FitW, plan.FitH)
+	}
+	return small, fitted, nil
+}
+
+// ck2Downscale writes a smaller copy of the plate beside it, once, and keeps
+// it: the same clip keyed again on the same card wants the same size. Lanczos
+// and 4:4:4 because this is the plate a matte is pulled from, not a preview —
+// chroma subsampling would be thrown away exactly at the green edge that
+// matters. The output is smaller than the plate, so the matte is too: that is
+// the trade this is making, and the log says so out loud.
+func ck2Downscale(ctx context.Context, dir, input string, w, h int, log func(string)) (string, error) {
+	out := filepath.Join(dir, ".fit", fmt.Sprintf("%dx%d.mp4", w, h))
+	if st, err := os.Stat(out); err == nil && st.Size() > 0 {
+		if src, err := os.Stat(input); err == nil && st.ModTime().After(src.ModTime()) {
+			log(fmt.Sprintf("reusing the %dx%d copy made earlier", w, h))
+			return out, nil
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(out), 0o775); err != nil {
+		return "", err
+	}
+	log(fmt.Sprintf("not enough VRAM for the native plate — resizing it to %dx%d first. "+
+		"The matte comes back at %dx%d, so scale it up in comp, or key this clip on a bigger card.",
+		w, h, w, h))
+	cmd := exec.CommandContext(ctx, cfg.FFmpeg, "-v", "error", "-y", "-i", input,
+		"-vf", fmt.Sprintf("scale=%d:%d:flags=lanczos", w, h),
+		"-c:v", "libx264", "-crf", "10", "-preset", "medium", "-pix_fmt", "yuv444p",
+		"-an", out)
+	if err := runLogged(cmd, log); err != nil {
+		_ = os.Remove(out)
+		return "", fmt.Errorf("could not resize the plate: %w", err)
+	}
+	log("resized plate written to " + out)
+	return out, nil
 }

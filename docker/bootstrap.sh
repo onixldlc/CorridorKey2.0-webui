@@ -75,18 +75,48 @@ python3 -m venv "$VENV"
 
 "$PY" -m pip install --no-cache-dir --upgrade pip
 
+# have <module>... — true when this venv can already import all of them.
+have() {
+	"$PY" -c "import $(printf '%s' "$*" | tr ' ' ',')" 2>/dev/null
+}
+
+# The stamp is only written once everything below has succeeded, so a restart
+# part-way through comes back here with some of it already installed. Each step
+# asks first: re-running pip would be minutes of work and, for the git
+# dependency in requirements.txt, another clone of a repository already on disk.
+
 # --no-deps: the dependency set was already resolved from torch's own metadata
 # and fetched above, minus the four nothing here uses. Letting pip resolve
 # again would pull those back.
-"$PY" -m pip install --no-cache-dir --no-deps --no-index \
-	--find-links "$WHEELS" \
-	"$WHEELS"/*.whl
+if have torch torchvision; then
+	printf 'ck-web: torch and torchvision are already installed, skipping\n'
+else
+	"$PY" -m pip install --no-cache-dir --no-deps --no-index \
+		--find-links "$WHEELS" \
+		"$WHEELS"/*.whl
+fi
 
 # torch's own pure-Python dependencies, as its metadata declares them. Small,
 # and they need real resolution, so pip fetches these itself.
-"$PY" -m pip install --no-cache-dir -r "$WHEELS/aria2.txt.deps"
+#
+# pip ends this step with "ERROR: pip's dependency resolver does not currently
+# take into account all the packages that are installed", naming nccl,
+# nvshmem, cusparselt and triton as missing. That is expected and nothing is
+# broken: wheels.py drops those four deliberately, because a single-GPU keyer
+# that never calls torch.compile does not touch them, and they are 2 GB.
+if have filelock jinja2 sympy fsspec networkx; then
+	printf "ck-web: torch's pure-Python dependencies are already installed, skipping\n"
+else
+	printf 'ck-web: the "dependency resolver" ERROR pip prints next is expected —\n'
+	printf '        nccl, nvshmem, cusparselt and triton are dropped on purpose\n'
+	"$PY" -m pip install --no-cache-dir -r "$WHEELS/aria2.txt.deps"
+fi
 
-"$PY" -m pip install --no-cache-dir -r "${CKWEB_ROOT:-/opt/corridorkey}/requirements.txt"
+if have cv2 transformers timm safetensors utils3d; then
+	printf 'ck-web: the keyer requirements are already installed, skipping\n'
+else
+	"$PY" -m pip install --no-cache-dir -r "${CKWEB_ROOT:-/opt/corridorkey}/requirements.txt"
+fi
 
 # Fail loudly here rather than at the first job, and prove CUDA is reachable
 # while the log is still being read.

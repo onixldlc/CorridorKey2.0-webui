@@ -23,6 +23,10 @@ type Params struct {
 	// CorridorKey 2.0.
 	HintQuality float64 `json:"hintQuality"` // how far to trust a supplied hint
 	LowVram     bool    `json:"lowVram"`     // staged inference for a small card
+	// FitVRAM lets ck-web shrink a plate that cannot fit the card at any
+	// window size, rather than failing the job. Off, such a clip is refused
+	// with the resolution that would have worked.
+	FitVRAM bool `json:"fitVram"`
 }
 
 // despillStrength maps the 0-10 slider onto infer.py's --despill_strength,
@@ -39,7 +43,8 @@ func (p Params) despillStrength() float64 {
 }
 
 func defaultParams() Params {
-	return Params{Linear: false, Despill: 5, Despeckle: true, SpeckSize: 400, Refiner: 1.0, HintQuality: 0.95}
+	return Params{Linear: false, Despill: 5, Despeckle: true, SpeckSize: 400,
+		Refiner: 1.0, HintQuality: 0.95, FitVRAM: true}
 }
 
 // Lanes keep a 37 GB download from blocking the GPU, and two GPU jobs from
@@ -63,6 +68,10 @@ type Job struct {
 	Ended    time.Time `json:"ended"`
 	Params   Params    `json:"params"`
 
+	// Progress is the live phase of a key: nil for anything that has none,
+	// and the last phase reached once the job has stopped.
+	Progress *Progress `json:"progress,omitempty"`
+
 	log    []string
 	cancel context.CancelFunc
 	mu     sync.Mutex
@@ -76,6 +85,18 @@ func (j *Job) append(line string) {
 	j.log = append(j.log, line)
 	j.mu.Unlock()
 	broadcast(event{Kind: "log", JobID: j.ID, Line: line})
+}
+
+// setProgress replaces the live phase and tells the page about it. The
+// tracker already rate-limits itself, so every call here is worth a frame.
+func (j *Job) setProgress(p *Progress) {
+	j.mu.Lock()
+	j.Progress = p
+	j.mu.Unlock()
+	// Its own kind, not "job": a job event makes the page reload the queue and
+	// redraw it, which at one bar update a second would throw away the console
+	// scroll position the operator is reading.
+	broadcast(event{Kind: "progress", JobID: j.ID, Prog: p})
 }
 
 // Tail returns at most n trailing log lines.
@@ -266,7 +287,18 @@ func (q *Queue) run(j *Job) {
 			err = errNotReady
 			break
 		}
-		err = p.Run(ctx, j.Action, j.Clip, j.Params, j.append)
+		sink := j.append
+		if j.Action == "run_inference" && j.Clip != "" {
+			// A key is the only job long enough to need a bar, and the only
+			// one whose phases can be read out of what it prints.
+			t := newCK2Tracker(j, ck2TempDir(j.Clip))
+			go t.watch(ctx)
+			sink = func(line string) {
+				j.append(line)
+				t.line(line)
+			}
+		}
+		err = p.Run(ctx, j.Action, j.Clip, j.Params, sink)
 	default:
 		err = errUnknownAction
 	}

@@ -11,9 +11,12 @@ import (
 // event is one server-sent push: a log line, a job state change, or a hint
 // that the clip list moved.
 type event struct {
-	Kind  string `json:"kind"` // log | job | clips | modules
+	Kind  string `json:"kind"` // log | job | progress | clips | modules
 	JobID int    `json:"jobId,omitempty"`
 	Line  string `json:"line,omitempty"`
+	// Prog rides along with a progress event so the page can move one bar
+	// without re-fetching the queue once a second.
+	Prog *Progress `json:"prog,omitempty"`
 }
 
 var hub = struct {

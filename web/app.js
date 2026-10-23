@@ -98,6 +98,7 @@ function params() {
     refiner: Number($("#p-refiner").value),
     hintQuality: Number($("#p-hintq").value),
     lowVram: $("#p-lowvram").dataset.on === "true",
+    fitVram: $("#p-fitvram").dataset.on === "true",
   };
 }
 
@@ -125,6 +126,12 @@ function wireDock() {
   });
   $("#p-hintq").addEventListener("input", (e) => ($("#p-hintq-v").textContent = e.target.value));
   $("#p-lowvram").addEventListener("click", (e) => {
+    const on = e.target.dataset.on !== "true";
+    e.target.dataset.on = String(on);
+    e.target.textContent = on ? "On" : "Off";
+    e.target.classList.toggle("on", on);
+  });
+  $("#p-fitvram").addEventListener("click", (e) => {
     const on = e.target.dataset.on !== "true";
     e.target.dataset.on = String(on);
     e.target.textContent = on ? "On" : "Off";
@@ -437,6 +444,35 @@ function renderViewer(body) {
   body.append(wrap);
 }
 
+// progressHTML draws the bar a running key reports. A phase with no number
+// behind it — the model loading, or a prepass on a filesystem that does not
+// do sparse files — gets a bar that pulses instead of one that lies.
+function progressHTML(j) {
+  const p = j.progress;
+  if (!p || j.state !== "running") return "";
+  const known = p.pct >= 0;
+  const bits = [p.phase, `step ${p.step} of ${p.steps}`];
+  if (known) bits.push(`${p.pct}%`);
+  if (p.note) bits.push(p.note);
+  return `<div class="prog">
+    <div class="prog-bar${known ? "" : " unknown"}"><span style="width:${known ? p.pct : 100}%"></span></div>
+    <span class="hud-label">${esc(bits.join(" · "))}</span>
+  </div>`;
+}
+
+// applyProgress moves one bar in place. A full re-render would also work and
+// would also scroll the console back to the bottom every second.
+function applyProgress(id, p) {
+  const j = state.jobs.find((x) => x.id === id);
+  if (j) j.progress = p;
+  const row = document.querySelector(`.job[data-id="${id}"]`);
+  if (!row || !j) return;
+  const html = progressHTML(j);
+  const bar = row.querySelector(".prog");
+  if (bar) bar.outerHTML = html;
+  else if (html) row.insertAdjacentHTML("beforeend", html);
+}
+
 function renderQueue(body) {
   const jobs = document.createElement("div");
   jobs.className = "jobs";
@@ -446,6 +482,7 @@ function renderQueue(body) {
   for (const j of [...state.jobs].reverse()) {
     const row = document.createElement("div");
     row.className = "job" + (j.id === state.job ? " selected" : "");
+    row.dataset.id = j.id;
     const cls = { done: "badge-good", failed: "badge-bad", running: "badge-accent", cancelled: "badge", queued: "badge-warn" }[j.state] || "badge";
     row.innerHTML = `
       <span class="id">#${j.id}</span>
@@ -455,7 +492,8 @@ function renderQueue(body) {
       <span>${esc(j.clip || j.module || (j.action === "bootstrap" ? "inference stack" : "all clips"))}</span>
       ${j.provider ? `<span class="hud-label">via ${esc(j.provider)}</span>` : ""}
       <div class="spacer"></div>
-      ${j.state === "running" || j.state === "queued" ? `<button class="btn-mono btn-ghost btn-danger" data-cancel="${j.id}">Cancel</button>` : ""}`;
+      ${j.state === "running" || j.state === "queued" ? `<button class="btn-mono btn-ghost btn-danger" data-cancel="${j.id}">Cancel</button>` : ""}
+      ${progressHTML(j)}`;
     row.addEventListener("click", async (e) => {
       if (e.target.dataset.cancel) {
         await api(`/api/jobs/${e.target.dataset.cancel}/cancel`, { method: "POST" });
@@ -701,6 +739,10 @@ function listen() {
       loadJobs().then(() => {
         if (state.page === "queue") render();
       });
+      return;
+    }
+    if (e.kind === "progress") {
+      applyProgress(e.jobId, e.prog);
       return;
     }
     if (e.kind === "modules") {

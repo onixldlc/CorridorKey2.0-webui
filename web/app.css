@@ -236,6 +236,20 @@
 .job.selected { border-color: var(--primary-400); }
 .job .spacer { flex: 1; }
 .job .id { font: 500 11px/1 var(--font-mono); color: var(--faint); }
+.job { flex-wrap: wrap; }
+.prog { flex-basis: 100%; display: flex; align-items: center; gap: 8px; }
+.prog-bar {
+  flex: 1; height: 4px; overflow: hidden;
+  background: var(--ui-sunken); border-radius: 2px;
+}
+.prog-bar span {
+  display: block; height: 100%;
+  background: var(--primary-400);
+  transition: width .3s linear;
+}
+/* Nothing to measure: pulse rather than show a full bar. */
+.prog-bar.unknown span { animation: prog-wait 1.6s ease-in-out infinite; }
+@keyframes prog-wait { 0%, 100% { opacity: .2; } 50% { opacity: .6; } }
 .console {
   background: var(--ui-sunken);
   border: 1px solid var(--line);

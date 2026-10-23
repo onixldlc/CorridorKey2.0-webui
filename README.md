@@ -316,9 +316,10 @@ falls back to a single-stream Go downloader and the Modules page says so.
 
 - Drag-and-drop plate upload
 - **Key clip** with the parameters as real controls: despill strength, input
-  gamma, hint trust, low-VRAM mode
+  gamma, hint trust, low-VRAM mode, fit-to-VRAM
 - Optional hint upload — first-frame matte or a full hint video
-- Live log streaming over SSE while a job runs, with cancel
+- Live log streaming over SSE while a job runs, with cancel, and a progress
+  bar that follows the key through its four phases
 - A viewer for every output — comp, matte, foreground, cutout — with a frame
   scrubber, EXR converted to PNG on the fly
 - Export any stage as ProRes 4444 with the alpha intact, or H.264
@@ -326,6 +327,75 @@ falls back to a single-stream Go downloader and the Modules page says so.
 
 Jobs run one at a time on the GPU; downloads have their own lane and run
 alongside, so fetching 5 GB does not block a key.
+
+### It sizes the GPU window itself
+
+The runtime picks its own Hann window from free VRAM, and its margin is thin:
+a 3840x2160 plate on a 24 GB card estimates a 20.8 GB peak for a 24-frame
+window, clears a 23.3 GB budget by 140 MB, runs for twenty minutes and then
+dies on `tried to allocate 2.24 GiB`.
+
+So ck-web makes that choice before it starts the job. It reads free VRAM from
+`nvidia-smi` — the same figure the runtime computes for itself, measured
+before anything is loaded — probes the plate with `ffprobe`, and runs
+upstream’s own measured peak table (`corridorkey/runtime.py`’s `_VRAM_PEAK_GB`,
+transcribed in `vram.go`) against a wider margin: 1.35x the estimate plus
+0.5 GB, instead of 1.1x plus 0.3 GB. The window it picks is passed as an
+explicit `--hann_chunk`, which turns the runtime’s own selection off. On that
+same 3090 the clip above now runs a full-precision 8-frame window at a 13.9 GB
+peak instead of failing.
+
+The first line of every key says what it decided:
+
+```
+VRAM: 3840x2160 plate (3840x2176 to the model, 8.36 MP) with 23.3 GB free:
+      hann_chunk=8 stride=4 full, peak ~13.9 GB of 23.3 GB
+VRAM: a 24-frame window — steadier edges over time — would need the plate at
+      2560x1440 on this card
+```
+
+A longer window holds the matte together over more frames, so when the native
+plate only earns a short one, the size that would have earned a longer one is
+named rather than left to be guessed.
+
+When not even a single-frame window fits — a small card, or a 4K plate on
+8 GB — **Fit to VRAM** (on by default) resizes the plate with Lanczos to the
+largest size that does fit and keys that, saying so in the log:
+
+```
+not enough VRAM for the native plate — resizing it to 2688x1512 first.
+The matte comes back at 2688x1512, so scale it up in comp, or key this clip
+on a bigger card.
+```
+
+The resized copy lands in `<clip>/.fit/<w>x<h>.mp4` as 4:4:4 x264 at CRF 10 —
+not a preview encode: chroma subsampling would be discarded exactly at the
+green edge the matte is pulled from — and is reused on the next run. With the
+toggle off, such a clip is refused up front with the resolution that would
+have worked, rather than running for twenty minutes first.
+
+### It says how far along it is
+
+`infer.py` prints one line per Hann window and nothing at all during the two
+prepasses, which at 4K is twenty silent minutes. The prepasses do leave a
+trail: both fill numpy memmaps that are created at full size and written front
+to back, so the blocks the filesystem has allocated under them are an exact
+measure of their progress. ck-web points `--temp_dir` at `<clip>/Output/.v2tmp`
+for that reason — which also keeps several GB of scratch off the container’s
+overlay — and watches it, which gives four phases:
+
+| Step | Phase | Measured by |
+|---|---|---|
+| 1 | loading the model | nothing — the bar pulses |
+| 2 | RVM prepass | blocks written into `*_rvm_feat.f16` |
+| 3 | foundation prepass | blocks written into `*_foundation_{moge,cradio}.f32` |
+| 4 | keying | `window i/N`, with the frame it has reached |
+
+Each phase carries its own percentage and a rough time left, extrapolated from
+how long it has taken so far. Bar updates arrive as their own SSE event rather
+than as a job change, so the console keeps the scroll position you left it at.
+A killed run’s scratch is cleared at the start of the next one; a clean run
+removes its own.
 
 ### How the outputs map
 

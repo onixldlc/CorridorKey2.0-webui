@@ -80,8 +80,12 @@
           <span class="val" id="p-hintq-v">0.95</span>
         </div>
         <div class="field" data-for="corridorkey2">
-          <span class="hud-label" title="Staged inference for cards with little VRAM">Low VRAM</span>
+          <span class="hud-label" title="Force staged inference. ck-web already stages a clip that needs it, so this is only for forcing it on">Low VRAM</span>
           <button class="switch" id="p-lowvram" data-on="false">Off</button>
+        </div>
+        <div class="field" data-for="corridorkey2">
+          <span class="hud-label" title="Resize the plate when it will not fit the card at any window size. Off, such a clip is refused with the size that would have worked">Fit to VRAM</span>
+          <button class="switch on" id="p-fitvram" data-on="true">On</button>
         </div>
         <div class="field" data-for="mock">
           <span class="hud-label">Despeckle</span>
