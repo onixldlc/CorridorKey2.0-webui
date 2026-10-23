@@ -143,7 +143,8 @@ func handleClipRoutes(w http.ResponseWriter, r *http.Request) {
 		if names == nil {
 			names = []string{}
 		}
-		writeJSON(w, map[string]any{"view": view, "count": len(names), "frames": names})
+		writeJSON(w, map[string]any{"view": view, "count": len(names),
+			"frames": names, "rev": inspectClip(name).Rev})
 	case verb == "frame" && r.Method == http.MethodGet:
 		serveFrame(w, r, name)
 	case verb == "input" && r.Method == http.MethodGet:
@@ -160,49 +161,39 @@ func handleClipRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveFrame sends one frame of one view. PNGs go out as they are; EXRs are
-// converted on the fly, because browsers cannot show them.
+// serveFrame sends one frame of one view: the matte, the hint, a plate frame,
+// or a comp rendered on the spot. Everything expensive about that lives in
+// frames.go — the queue, the single render per frame and the LRU; this is the
+// HTTP end of it.
 func serveFrame(w http.ResponseWriter, r *http.Request, clip string) {
-	view := q(r, "view", "matte")
-	if view == "comp" {
-		idx, _ := strconv.Atoi(q(r, "i", "0"))
-		out, err := compositeFrame(clip, idx, q(r, "bg", "checker"), despillOf(r))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write(out)
+	req, err := planFrame(r, clip)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	names, dir := frameList(clip, view)
-	if len(names) == 0 {
-		http.Error(w, "no frames in "+view, http.StatusNotFound)
-		return
-	}
-	idx, _ := strconv.Atoi(q(r, "i", "0"))
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(names) {
-		idx = len(names) - 1
-	}
-	path := filepath.Join(dir, names[idx])
 
-	if strings.EqualFold(filepath.Ext(path), ".exr") {
-		out, err := frameAsPNG(path, 0, 0)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write(out)
+	// The browser keeps the bytes; this is the cheap half of scrubbing back
+	// over ground already covered, and it costs no ffmpeg at all.
+	etag := req.etag()
+	if match := r.Header.Get("If-None-Match"); match != "" && strings.Contains(match, strings.Trim(etag, `"`)) {
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", frameCacheControl)
+		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store")
-	http.ServeFile(w, r, path)
+
+	frame, err := renderFrameRequest(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", frame.Type)
+	w.Header().Set("ETag", frame.ETag)
+	// The ETag carries the source's size and mtime, so a re-key changes the
+	// URL's answer and a stale copy cannot outlive it.
+	w.Header().Set("Cache-Control", frameCacheControl)
+	w.Header().Set("Content-Length", strconv.Itoa(len(frame.Body)))
+	_, _ = w.Write(frame.Body)
 }
 
 // serveExport stitches a view's frames into a download. ProRes 4444 carries

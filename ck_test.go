@@ -1,12 +1,16 @@
 package main
 
 import (
+	"fmt"
 	"image/color"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func itoa(i int) string {
@@ -586,5 +590,132 @@ func TestDespillMatchesUpstream(t *testing.T) {
 	if got := despillFilter(0.5); !strings.Contains(got, "geq=") ||
 		!strings.Contains(got, "max(g(X,Y)-(r(X,Y)+b(X,Y))/2,0)") {
 		t.Errorf("the export filter does not carry the same spill term: %q", got)
+	}
+}
+
+// TestFrameCacheEvictsOldest — the LRU is what keeps a long clip from growing
+// without bound, so its ceiling and its order are both pinned.
+func TestFrameCacheEvictsOldest(t *testing.T) {
+	c := newFrameCache(300)
+	put := func(k string, n int) {
+		c.put(k, renderedFrame{Body: make([]byte, n), Cache: true})
+	}
+	put("a", 100)
+	put("b", 100)
+	put("c", 100)
+	if _, ok := c.get("a"); !ok {
+		t.Fatal("a fell out while there was still room")
+	}
+	// a was just read, so b is now the oldest and must go first.
+	put("d", 100)
+	if _, ok := c.get("b"); ok {
+		t.Error("the least recently used frame survived")
+	}
+	if _, ok := c.get("a"); !ok {
+		t.Error("the most recently used frame was evicted")
+	}
+	if n, used := c.stats(); used > 300 || n != 3 {
+		t.Errorf("cache holds %d frames and %d bytes, over its 300 byte ceiling", n, used)
+	}
+
+	// Something larger than the whole cache is not worth evicting everything
+	// for, and an error answer is never cached at all.
+	put("huge", 400)
+	if _, ok := c.get("huge"); ok {
+		t.Error("a frame bigger than the cache was stored anyway")
+	}
+	c.put("bad", renderedFrame{Body: []byte("x"), Cache: false})
+	if _, ok := c.get("bad"); ok {
+		t.Error("an uncacheable answer was cached")
+	}
+}
+
+// TestRenderOnceCollapsesDuplicates: a scrubber fires a request per input
+// event, and several of them land on the same frame. They must cost one
+// render between them, not one each.
+func TestRenderOnceCollapsesDuplicates(t *testing.T) {
+	var runs int32
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = renderOnce("same-frame", func() (renderedFrame, error) {
+				atomic.AddInt32(&runs, 1)
+				<-release // hold the render open so the others pile up behind it
+				return renderedFrame{Body: []byte("frame"), Cache: true}, nil
+			})
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if got := atomic.LoadInt32(&runs); got != 1 {
+		t.Errorf("%d renders for one frame, want 1", got)
+	}
+	if _, ok := frames.get("same-frame"); !ok {
+		t.Error("the render was not cached for the next request")
+	}
+}
+
+// TestRenderQueueIsBounded — the ceiling on concurrent renders is the whole
+// reason a drag no longer forks forty ffmpegs.
+func TestRenderQueueIsBounded(t *testing.T) {
+	if cap(renderSem) != maxFrameRenders {
+		t.Fatalf("queue holds %d, maxFrameRenders is %d", cap(renderSem), maxFrameRenders)
+	}
+	if maxFrameRenders < 2 || maxFrameRenders > 4 {
+		t.Errorf("maxFrameRenders is %d; it is meant to stay between 2 and 4", maxFrameRenders)
+	}
+
+	var live, peak int32
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			_, _ = renderOnce(fmt.Sprintf("bounded-%d", n), func() (renderedFrame, error) {
+				cur := atomic.AddInt32(&live, 1)
+				for {
+					old := atomic.LoadInt32(&peak)
+					if cur <= old || atomic.CompareAndSwapInt32(&peak, old, cur) {
+						break
+					}
+				}
+				time.Sleep(10 * time.Millisecond)
+				atomic.AddInt32(&live, -1)
+				return renderedFrame{Body: []byte("x"), Cache: true}, nil
+			})
+		}(i)
+	}
+	wg.Wait()
+	if int(peak) > maxFrameRenders {
+		t.Errorf("%d renders ran at once, ceiling is %d", peak, maxFrameRenders)
+	}
+}
+
+// TestFrameKeyCoversEverythingThatChangesThePicture — a cache key that misses
+// a parameter serves the wrong picture, which is worse than serving none.
+func TestFrameKeyCoversEverythingThatChangesThePicture(t *testing.T) {
+	base := frameRequest{Clip: "Shot_010", View: "comp", Index: 4, BG: "checker",
+		Despill: 5, Source: "/clips/Shot_010/Output/Matte/00004.exr", Stamp: "a-b"}
+	seen := map[string]string{base.key(): "base"}
+	for name, alt := range map[string]frameRequest{
+		"clip":    {Clip: "Shot_020", View: "comp", Index: 4, BG: "checker", Despill: 5, Source: base.Source, Stamp: "a-b"},
+		"view":    {Clip: "Shot_010", View: "matte", Index: 4, BG: "checker", Despill: 5, Source: base.Source, Stamp: "a-b"},
+		"index":   {Clip: "Shot_010", View: "comp", Index: 5, BG: "checker", Despill: 5, Source: base.Source, Stamp: "a-b"},
+		"bg":      {Clip: "Shot_010", View: "comp", Index: 4, BG: "green", Despill: 5, Source: base.Source, Stamp: "a-b"},
+		"despill": {Clip: "Shot_010", View: "comp", Index: 4, BG: "checker", Despill: 6, Source: base.Source, Stamp: "a-b"},
+		"stamp":   {Clip: "Shot_010", View: "comp", Index: 4, BG: "checker", Despill: 5, Source: base.Source, Stamp: "a-c"},
+	} {
+		k := alt.key()
+		if other, clash := seen[k]; clash {
+			t.Errorf("changing the %s gives the same key as %s", name, other)
+		}
+		seen[k] = name
+	}
+	if base.etag() != `"`+base.key()+`"` {
+		t.Errorf("the etag is not the quoted key: %s", base.etag())
 	}
 }

@@ -196,6 +196,28 @@
 .scrub input[type="range"] { flex: 1; }
 .scrub .frame-no { font: 500 11px/1 var(--font-mono); color: var(--faint); min-width: 92px; text-align: right; }
 
+/* Coverage: one segment per frame, lit when that frame has been rendered and
+   cached. It is the compositing progress of the sequence, the way a player
+   shows what it has buffered. */
+.coverage-wrap { display: flex; flex-direction: column; gap: 4px; }
+.coverage {
+  display: flex;
+  gap: 1px;
+  height: 6px;
+  background: var(--ui-sunken);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  overflow: hidden;
+  cursor: pointer;
+}
+.coverage .seg { flex: 1 1 0; min-width: 0; background: transparent; }
+.coverage .seg.on { background: var(--primary-400); }
+.coverage .seg.busy { background: var(--badge); animation: prog-wait 1.2s ease-in-out infinite; }
+.coverage .seg.at { background: var(--ink-strong); }
+
+/* The matte standing in for a comp that is still being blended. */
+.stage img.placeholder { opacity: .55; filter: saturate(0); }
+
 /* ── Prompt box: the dock that submits work ─────────────────────────────── */
 
 .dock {

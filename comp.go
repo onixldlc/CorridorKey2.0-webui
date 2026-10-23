@@ -97,8 +97,9 @@ func despillPixel(r, g, b float64, strength float64) (float64, float64, float64)
 }
 
 // compositeFrame renders one frame of the plate through the matte, over the
-// chosen background, and returns it as PNG.
-func compositeFrame(clip string, idx int, bg string, despill float64) ([]byte, error) {
+// chosen background. The caller encodes it: the viewer wants JPEG, which is a
+// tenth of the bytes for a picture nobody pulls a matte from.
+func compositeFrame(clip string, idx int, bg string, despill float64) (*image.NRGBA, error) {
 	names, dir := frameList(clip, "matte")
 	if len(names) == 0 {
 		return nil, fmt.Errorf("no matte yet — key the clip first")
@@ -149,11 +150,7 @@ func compositeFrame(clip string, idx int, bg string, despill float64) ([]byte, e
 		}
 	}
 
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, out); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return out, nil
 }
 
 // clamp16 brings a channel back into range after despilling it.

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -29,6 +31,11 @@ type Clip struct {
 	Size    int64  `json:"size"`   // input bytes
 	Preview string `json:"preview"`
 	Running bool   `json:"running"`
+	// Rev changes whenever a new key, a new hint or a new plate would make
+	// the frames on disk different. The page puts it in every frame URL, so
+	// re-keying a clip gives its frames new URLs and whatever a browser had
+	// cached under the old ones can be found and dropped.
+	Rev string `json:"rev"`
 }
 
 var videoExt = map[string]bool{
@@ -101,7 +108,29 @@ func inspectClip(name string) Clip {
 		c.Preview = "hint"
 	}
 	c.Running = queue.isRunning(name)
+	c.Rev = clipRev(dir, c)
 	return c
+}
+
+// clipRev identifies the current contents of a clip cheaply: how many matte
+// frames there are and when the newest was written, plus the size and mtime
+// of the plate. Hashing hundreds of megabytes of EXR to answer the same
+// question would cost more than rendering the frames.
+func clipRev(dir string, c Clip) string {
+	var newest int64
+	if entries, err := os.ReadDir(filepath.Join(dir, "Output", "Matte")); err == nil {
+		for _, e := range entries {
+			if info, err := e.Info(); err == nil && info.ModTime().UnixNano() > newest {
+				newest = info.ModTime().UnixNano()
+			}
+		}
+	}
+	plate := "none"
+	if c.Input != "" && !strings.HasSuffix(c.Input, "/") {
+		plate = stampOf(filepath.Join(dir, c.Input))
+	}
+	return fmt.Sprintf("%d.%s.%s.%d", c.Frames,
+		strconv.FormatInt(newest, 36), plate, c.Alpha)
 }
 
 func firstVideo(dir string) (string, int64) {

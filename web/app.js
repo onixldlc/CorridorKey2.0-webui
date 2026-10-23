@@ -118,9 +118,16 @@ function syncDockToProvider(id) {
 }
 
 function wireDock() {
+  let despillTimer = null;
   $("#p-despill").addEventListener("input", (e) => {
     $("#p-despill-v").textContent = e.target.value;
-    if (state.page === "viewer" && state.view === "comp") render();
+    // Each step is a different picture, so it is a different cache key and a
+    // different render. Wait for the slider to settle before asking for any
+    // of it.
+    clearTimeout(despillTimer);
+    despillTimer = setTimeout(() => {
+      if (state.page === "viewer" && state.view === "comp") render();
+    }, 350);
   });
   $("#p-gamma").addEventListener("click", (e) => {
     const on = e.target.dataset.on !== "true";
@@ -280,7 +287,7 @@ function renderClips(body) {
     tile.innerHTML = `
       <div class="thumb">
         ${thumbView
-          ? `<img loading="lazy" src="${frameSrc(c.name, thumbView, 0, state.bg)}" alt="">`
+          ? `<img loading="lazy" src="${frameSrc(c.name, thumbView, 0, state.bg, c.rev)}" alt="">`
           : `<span class="empty hud-label">no preview</span>`}
         <div class="corner"><span class="badge ${cls}">${label}</span></div>
         ${c.running ? '<div class="spin"></div>' : ""}
@@ -401,12 +408,253 @@ const BACKGROUNDS = ["checker", "black", "white", "grey", "green", "magenta"];
 
 // frameSrc is the URL of one frame of the current view. The preview carries
 // the background with it, because the server renders it rather than reading it.
-function frameSrc(clip, view, i, bg) {
+function despillNow() {
+  const el = $("#p-despill");
+  return el ? el.value : 5;
+}
+
+function frameSrc(clip, view, i, bg, rev) {
   // Despill belongs to the preview now: the matte does not depend on it, so
   // the server applies the slider here rather than passing it to infer.py.
+  // rev is the clip's revision: it puts a re-keyed clip on new URLs, so a
+  // cached frame of the old matte can never be served for the new one.
   const q = `view=${view}&i=${i}`
-    + (view === "comp" ? `&bg=${bg}&despill=${$("#p-despill") ? $("#p-despill").value : 5}` : "");
+    + (view === "comp" ? `&bg=${bg}&despill=${despillNow()}` : "")
+    + (rev ? `&v=${encodeURIComponent(rev)}` : "");
   return withToken(`/api/clips/${encodeURIComponent(clip)}/frame?${q}`);
+}
+
+// ── frames: cache first, queue of one, warm the rest ──────────────────────
+//
+// Every comp frame costs the server two ffmpeg calls and a blend, so dragging
+// the scrubber used to fire one of those per input event and bury the box.
+// Now: at most one request is in flight, the newest frame always wins, and
+// everything that comes back is kept in the Cache Storage API — which is sized
+// against free disk rather than localStorage's five megabytes, so a whole
+// clip's worth of previews fits. Frames already in there cost no server work
+// at all, not even a 304.
+const FRAME_CACHE = "ck-frames-v1";
+const WARM_AHEAD = 32;     // frames to fill in ahead of the cursor
+const WARM_PARALLEL = 2;   // in flight while warming, so the cursor stays first
+
+const strip = {
+  key: "",                 // identity of the sequence on screen
+  covered: new Set(),      // frame indexes known to be in the cache
+  pending: new Set(),      // frame indexes being fetched right now
+  blobs: new Map(),        // url -> object URL, revoked when the strip changes
+  want: 0,                 // the frame the user is actually on
+  inFlight: null,          // AbortController of the cursor's own request
+  warmTimer: null,
+  warming: false,
+};
+
+function stripKey() {
+  const clip = state.clips.find((c) => c.name === state.selected) || {};
+  return [state.selected, state.view, state.view === "comp" ? state.bg : "",
+    state.view === "comp" ? despillNow() : "", clip.rev || ""].join("|");
+}
+
+function clipRev() {
+  const clip = state.clips.find((c) => c.name === state.selected) || {};
+  return clip.rev || "";
+}
+
+// frameCache is absent on an insecure origin and in some private windows, in
+// which case everything below still works, just without the cache.
+async function frameCache() {
+  try {
+    if (!window.caches) return null;
+    return await caches.open(FRAME_CACHE);
+  } catch {
+    return null;
+  }
+}
+
+// getFrame returns an object URL for one frame, from the cache when it is
+// there and from the server when it is not.
+async function getFrame(url, signal) {
+  if (strip.blobs.has(url)) return strip.blobs.get(url);
+  const cache = await frameCache();
+  let res = cache ? await cache.match(url) : null;
+  if (!res) {
+    res = await fetch(url, { signal, headers: token ? { "X-CK-Token": token } : {} });
+    if (!res.ok) throw new Error(`frame ${res.status}`);
+    if (cache) {
+      try { await cache.put(url, res.clone()); } catch {} // quota, or a 206
+    }
+  }
+  const blob = await res.blob();
+  const obj = URL.createObjectURL(blob);
+  strip.blobs.set(url, obj);
+  return obj;
+}
+
+// resetStrip drops what belonged to the previous sequence and reads back which
+// frames of the new one are already cached, so the coverage bar is right
+// before anything is fetched.
+async function resetStrip() {
+  for (const obj of strip.blobs.values()) URL.revokeObjectURL(obj);
+  strip.blobs.clear();
+  strip.covered.clear();
+  strip.pending.clear();
+  if (strip.inFlight) strip.inFlight.abort();
+  strip.inFlight = null;
+  strip.key = stripKey();
+
+  const cache = await frameCache();
+  if (!cache || !state.selected) return;
+  const rev = clipRev();
+  const prefix = `/api/clips/${encodeURIComponent(state.selected)}/frame?`;
+  for (const req of await cache.keys()) {
+    const u = new URL(req.url, location.origin);
+    if (!u.pathname.startsWith(`/api/clips/${encodeURIComponent(state.selected)}/frame`)) continue;
+    // A frame of an older key is unreachable now; drop it rather than let it
+    // sit in the quota forever.
+    if (rev && u.searchParams.get("v") && u.searchParams.get("v") !== rev) {
+      cache.delete(req);
+      continue;
+    }
+    if (u.searchParams.get("view") !== state.view) continue;
+    if (state.view === "comp"
+      && (u.searchParams.get("bg") !== state.bg
+        || u.searchParams.get("despill") !== String(despillNow()))) continue;
+    strip.covered.add(Number(u.searchParams.get("i")));
+  }
+  void prefix;
+}
+
+// showFrame puts frame i on screen. For a comp it shows the matte first,
+// which is one ffmpeg call rather than three and is usually already cached,
+// and swaps the composite in when it arrives — so the scrubber never waits on
+// the blend of a frame the user has already dragged past.
+async function showFrame(i) {
+  strip.want = i;
+  const img = document.querySelector(".stage img");
+  if (!img) return;
+  const rev = clipRev();
+
+  if (state.view === "comp") {
+    const matte = frameSrc(state.selected, "matte", i, state.bg, rev);
+    try {
+      const obj = await getFrame(matte);
+      if (strip.want === i && !strip.covered.has(i)) {
+        img.src = obj;
+        img.classList.add("placeholder");
+      }
+    } catch {} // the matte is a courtesy; the comp below is the real answer
+    if (strip.want !== i) return;
+  }
+
+  if (strip.inFlight) strip.inFlight.abort();
+  strip.inFlight = new AbortController();
+  const url = frameSrc(state.selected, state.view, i, state.bg, rev);
+  strip.pending.add(i);
+  paintCoverage();
+  try {
+    const obj = await getFrame(url, strip.inFlight.signal);
+    strip.covered.add(i);
+    if (strip.want === i) {
+      img.src = obj;
+      img.classList.remove("placeholder");
+    }
+  } catch (e) {
+    if (e.name !== "AbortError") toast(`Frame ${i + 1}: ${e.message}`, true);
+  } finally {
+    strip.pending.delete(i);
+    paintCoverage();
+    scheduleWarm();
+  }
+}
+
+// scheduleWarm fills the cache forward from the cursor once the user has
+// stopped dragging. It never competes with the cursor: WARM_PARALLEL is small
+// and showFrame's own request is not one of them.
+function scheduleWarm() {
+  clearTimeout(strip.warmTimer);
+  strip.warmTimer = setTimeout(warm, 400);
+}
+
+async function warm() {
+  if (strip.warming || !state.frames.length) return;
+  strip.warming = true;
+  const mine = strip.key;
+  const rev = clipRev();
+  try {
+    const todo = [];
+    for (let n = 0; n < WARM_AHEAD && todo.length < WARM_AHEAD; n++) {
+      const i = strip.want + n;
+      if (i >= state.frames.length) break;
+      if (!strip.covered.has(i) && !strip.pending.has(i)) todo.push(i);
+    }
+    while (todo.length) {
+      if (strip.key !== mine || state.page !== "viewer") return;
+      const batch = todo.splice(0, WARM_PARALLEL);
+      await Promise.all(batch.map(async (i) => {
+        strip.pending.add(i);
+        paintCoverage();
+        try {
+          await getFrame(frameSrc(state.selected, state.view, i, state.bg, rev));
+          strip.covered.add(i);
+        } catch {} // a warm frame that fails is not worth a toast
+        strip.pending.delete(i);
+        paintCoverage();
+      }));
+    }
+  } finally {
+    strip.warming = false;
+  }
+}
+
+// paintCoverage draws the bar above the frame: which of the sequence has been
+// rendered and cached, which is being worked on, and where the cursor is.
+function paintCoverage() {
+  const bar = document.querySelector(".coverage");
+  if (!bar) return;
+  const total = state.frames.length;
+  if (!total) return;
+  for (const seg of bar.querySelectorAll(".seg")) {
+    const i = Number(seg.dataset.i);
+    seg.className = "seg"
+      + (strip.covered.has(i) ? " on" : "")
+      + (strip.pending.has(i) ? " busy" : "")
+      + (i === strip.want ? " at" : "");
+  }
+  const label = bar.parentElement && bar.parentElement.querySelector(".coverage-label");
+  if (label) {
+    label.textContent = state.view === "comp"
+      ? `${strip.covered.size} / ${total} composited`
+      : `${strip.covered.size} / ${total} cached`;
+  }
+}
+
+function coverageBar() {
+  const wrap = document.createElement("div");
+  wrap.className = "coverage-wrap";
+  const bar = document.createElement("div");
+  bar.className = "coverage";
+  for (let i = 0; i < state.frames.length; i++) {
+    const seg = document.createElement("span");
+    seg.className = "seg";
+    seg.dataset.i = i;
+    seg.title = `frame ${i + 1}`;
+    seg.addEventListener("click", () => jumpTo(i));
+    bar.append(seg);
+  }
+  wrap.innerHTML = `<span class="hud-label coverage-label"></span>`;
+  wrap.append(bar);
+  return wrap;
+}
+
+// jumpTo moves the cursor without re-rendering the page, so the scrubber keeps
+// its grab and the console keeps its scroll.
+function jumpTo(i) {
+  state.frame = i;
+  const no = document.querySelector(".scrub .frame-no");
+  if (no) no.textContent = `${i + 1} / ${state.frames.length}`;
+  const range = document.querySelector(".scrub input");
+  if (range && Number(range.value) !== i) range.value = i;
+  paintCoverage();
+  showFrame(i);
 }
 
 function renderViewer(body) {
@@ -427,6 +675,7 @@ function renderViewer(body) {
     b.addEventListener("click", async () => {
       state.view = key;
       state.frame = 0;
+      location.hash = `viewer:${encodeURIComponent(state.selected)}:${key}`;
       await loadFrames();
       render();
     });
@@ -460,12 +709,16 @@ function renderViewer(body) {
     wrap.append(bgs);
   }
 
+  if (state.frames.length > 1) wrap.append(coverageBar());
+
   const stage = document.createElement("div");
   stage.className = "stage";
   if (state.view === "plate" && clip.input && !clip.input.endsWith("/")) {
     stage.innerHTML = `<video controls preload="metadata" src="${withToken(`/api/clips/${encodeURIComponent(state.selected)}/input`)}"></video>`;
   } else if (state.frames.length) {
-    stage.innerHTML = `<img src="${frameSrc(state.selected, state.view, state.frame, state.bg)}" alt="">`;
+    // No src: showFrame() fills it from the cache or the server, so a frame
+    // that is already cached appears without a request at all.
+    stage.innerHTML = `<img alt="" decoding="async">`;
   } else {
     stage.innerHTML = `<div class="empty">${esc(EMPTY_VIEW[state.view] || `Nothing in ${state.view} yet.`)}<br>
       <span class="hud-label">${state.view === "hint" ? "a hint is optional" : "key the clip to fill this"}</span></div>`;
@@ -479,16 +732,16 @@ function renderViewer(body) {
       <span class="hud-label">Frame</span>
       <input type="range" min="0" max="${state.frames.length - 1}" value="${state.frame}">
       <span class="frame-no">${state.frame + 1} / ${state.frames.length}</span>`;
-    const range = scrub.querySelector("input");
-    range.addEventListener("input", () => {
-      state.frame = Number(range.value);
-      scrub.querySelector(".frame-no").textContent = `${state.frame + 1} / ${state.frames.length}`;
-      const img = stage.querySelector("img");
-      if (img) img.src = frameSrc(state.selected, state.view, state.frame, state.bg);
-    });
+    scrub.querySelector("input").addEventListener("input", (e) => jumpTo(Number(e.target.value)));
     wrap.append(scrub);
   }
   body.append(wrap);
+
+  if (state.frames.length) {
+    const go = () => { paintCoverage(); showFrame(state.frame); };
+    if (strip.key !== stripKey()) resetStrip().then(go);
+    else go();
+  }
 }
 
 // progressHTML draws the bar a running key reports. A phase with no number
@@ -787,11 +1040,26 @@ function hostOf(u) {
   try { return new URL(u).host.replace(/^www\./, ""); } catch { return u; }
 }
 
+// The hash is page:clip:view, so a reload — or a link pasted to someone on the
+// same box — comes back to the same frame of the same clip rather than to the
+// clip list.
 function go(page) {
   state.page = page;
-  location.hash = page;
+  location.hash = page === "viewer" && state.selected
+    ? `viewer:${encodeURIComponent(state.selected)}:${state.view}`
+    : page;
   if (page === "viewer") loadFrames().then(render);
   else render();
+}
+
+function readHash() {
+  const [page, clip, view] = location.hash.slice(1).split(":");
+  if (!TITLES[page]) return null;
+  return {
+    page,
+    clip: clip ? decodeURIComponent(clip) : null,
+    view: VIEWS.some(([k]) => k === view) ? view : null,
+  };
 }
 
 async function refresh() {
@@ -850,11 +1118,19 @@ $("#refresh").addEventListener("click", refresh);
 $("#toggle-sidebar").addEventListener("click", () =>
   $("#app").classList.toggle("sidebar-closed"));
 window.addEventListener("hashchange", () => {
-  const p = location.hash.slice(1);
-  if (TITLES[p] && p !== state.page) go(p);
+  const h = readHash();
+  if (!h) return;
+  if (h.clip) state.selected = h.clip;
+  if (h.view) state.view = h.view;
+  if (h.page !== state.page) go(h.page);
 });
 
 wireDock();
-if (TITLES[location.hash.slice(1)]) state.page = location.hash.slice(1);
+const opening = readHash();
+if (opening) {
+  state.page = opening.page;
+  if (opening.clip) state.selected = opening.clip;
+  if (opening.view) state.view = opening.view;
+}
 refresh().then(listen);
 setInterval(loadHealth, 10000); // the GPU readout, which nothing pushes

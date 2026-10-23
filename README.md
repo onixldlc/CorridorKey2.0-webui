@@ -421,6 +421,65 @@ than as a job change, so the console keeps the scroll position you left it at.
 A killed run’s scratch is cleared at the start of the next one; a clean run
 removes its own.
 
+### Scrubbing without killing the box
+
+Every frame the viewer shows costs work: an EXR is 16-bit linear and no browser
+reads it, so ffmpeg converts it, and a comp also seeks the plate and blends the
+two. The first version of the scrubber fired one of those per `input` event and
+answered `Cache-Control: no-store`, so dragging forked dozens of ffmpegs at
+once, nothing was ever reused, and the box fell over.
+
+It is cached at both ends now. On the server:
+
+- **A ceiling on concurrent renders** — `NumCPU/2`, clamped to 2–4. A flood
+  queues instead of forking.
+- **One render per frame.** Requests for a frame already being rendered wait for
+  that render rather than starting another, so a drag that asks for frame 12
+  five times costs one conversion.
+- **A 192 MB LRU** of rendered frames in front of both.
+- **An ETag** built from the source frame’s size and mtime: a revisit is a 304
+  with no ffmpeg at all, and a re-key changes the tag by itself.
+- Previews capped at 1600px and encoded **JPEG q88** — a tenth of the PNG for a
+  picture nobody pulls a matte from. The matte itself stays lossless.
+
+Measured on a 48-frame 720p clip: two full drags at 32 connections, 96
+concurrent requests, which is what killed it before.
+
+```
+flood: 96 requests in 4.7s, all 200, median 20.8 KB
+peak ffmpeg processes: 4          (the ceiling; it used to be “as many as asked”)
+warm pass over 48 frames: 0.03s   (the LRU)
+revisit with If-None-Match: 304
+server alive: True
+```
+
+In the browser, frames go into the **Cache Storage API** — sized against free
+disk rather than `localStorage`’s five megabytes, which would not hold one 4K
+frame. The page keeps one request in flight and always jumps to the newest
+frame, then fills the cache forward from the cursor once the drag stops. Every
+frame URL carries the clip’s `rev`, so a re-key puts the sequence on new URLs
+and the entries under the old ones are found and deleted.
+
+Two things follow from that, and both are visible:
+
+- **The matte stands in while a comp renders.** Switching to Preview shows the
+  matte for that frame immediately — one ffmpeg call, usually already cached —
+  dimmed, and the composite replaces it when it arrives. The scrubber never
+  waits on the blend of a frame you have already dragged past.
+- **A coverage bar above the frame** shows which of the sequence has been
+  composited and cached, which is being worked on, and where the cursor is, with
+  a count beside it. Clicking it jumps to that frame.
+
+Measured in a real browser against a keyed 24-frame clip:
+
+```
+first visit : 25 frame requests   (1 matte placeholder + 24 composites warmed)
+second visit: 0  frame requests   (the whole sequence came from Cache Storage)
+```
+
+The viewer is addressable now too — `#viewer:<clip>:<view>` — so a reload comes
+back to the frame you were looking at instead of to the clip list.
+
 ### One output, and a preview of it
 
 `infer.py` is run with `--outputs alpha --output_format exr`: the matte, and
