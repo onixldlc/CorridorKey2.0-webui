@@ -126,20 +126,20 @@ docker run -d --name ck-web \
   ghcr.io/onixldlc/corridorkey2-webui:latest
 ```
 
-`/data` is **not** a checkout — it holds your clips, the weights the Modules
-page installs, and the Python stack the keyer runs on. Replacing or upgrading
-the container costs nothing, because nothing in it is yours.
+`/data` is **not** a checkout — it holds your clips, the weights the box
+fetches for itself, and the Python stack the keyer runs on. Replacing or
+upgrading the container costs nothing, because nothing in it is yours.
 
 **The image carries no torch.** It is the UI, the keyer and ffmpeg: a few
-hundred megabytes that pull in seconds. On first start `bootstrap.sh` fetches
-torch and its CUDA libraries into `/data/venv` with aria2c, at the full speed
-of the box's link rather than pip's one stream, and stamps what it built. Every
-later start — including after an image upgrade — matches the stamp and skips
-straight to the server. Four of torch's dependencies are left out, because
-nothing in the keyer reaches them: `nccl` and `nvshmem` are multi-GPU
-collectives and this runs on one card, `cusparselt` is unreferenced, and
-`triton` only matters to `torch.compile`, which the runtime never calls. That
-is 863 MiB saved on every fetch.
+hundred megabytes that pull in seconds. On first start ck-web queues
+`bootstrap.sh`, which fetches torch and its CUDA libraries into `/data/venv`
+with aria2c, at the full speed of the box's link rather than pip's one stream,
+and stamps what it built. Every later start — including after an image upgrade
+— matches the stamp and skips straight to the server. Four of torch's
+dependencies are left out, because nothing in the keyer reaches them: `nccl`
+and `nvshmem` are multi-GPU collectives and this runs on one card, `cusparselt`
+is unreferenced, and `triton` only matters to `torch.compile`, which the
+runtime never calls. That is 863 MiB saved on every fetch.
 
 Budget the disk from what actually lands on it:
 
@@ -262,6 +262,40 @@ Three details the installer gets right because upstream does:
   it comes from Google's storage bucket — so its published MD5 is verified and
   a bad file is deleted rather than left to fail at load time.
 
+### It sets itself up
+
+Nobody rents a GPU box to click four Install buttons. At startup ck-web looks
+at the machine it is on, and if it looks like a production box it provisions
+itself — no page, no button, nothing to remember:
+
+1. **Is there a CUDA GPU?** `nvidia-smi` is asked. Without one `infer.py`
+   refuses to run at all, so fetching ten gigabytes would be waste.
+2. **Will it all fit?** The inference stack, the missing weights and room to
+   key into are summed and compared with the free space on the filesystems
+   that will actually hold them. On a volume that cannot finish, the download
+   would die halfway and leave the box in a worse state than not starting.
+
+If both hold, the inference stack and every missing weight are queued on the
+net lane — the stack first, then the checkpoints, one at a time so they do not
+fight each other for the link — and the GPU lane stays free. The whole thing
+streams into the browser log like any other job. When it finishes, the
+provider flips from the mock keyer to the real one on its own; the container
+does not need a restart.
+
+If either gate fails, nothing is downloaded and the Modules page says exactly
+which one and by how much, with a **Set this box up** button that asks again
+once you have fixed it. `POST /api/provision` is the same thing without a
+browser, and `GET /api/provision` is the decision as JSON.
+
+Two escape hatches. `-mode manual` turns self-provisioning off and leaves
+every download to the buttons. `-mode prod` is the operator asserting this is
+a GPU box when `nvidia-smi` is not there to say so, which skips the first gate
+but not the second.
+
+Already-provisioned boxes cost nothing: the weights are each marked by a file
+on disk, the stack by the stamp `bootstrap.sh` writes, so a restart reads four
+paths and does nothing.
+
 ### Downloads go through aria2c
 
 A single HTTP stream does not come close to filling a rented box's link, so
@@ -312,13 +346,14 @@ layout the viewer reads:
 | Flag | Env | Default | In the image |
 |---|---|---|---|
 | `-addr` | `CKWEB_ADDR` | `:8080` | `:8080` |
-| `-mode` | `CKWEB_MODE` | `auto` — `dev` pins the mock and blocks downloads | `auto` |
+| `-mode` | `CKWEB_MODE` | `auto` — `dev` pins the mock and blocks downloads, `manual` turns off self-provisioning, `prod` provisions without a GPU check | `auto` |
 | `-provider` | `CKWEB_PROVIDER` | `auto` — or `corridorkey2` / `mock` | `auto` |
 | `-root` | `CKWEB_ROOT` | `/data` — the checkout | `/opt/corridorkey` |
 | `-clips` | `CKWEB_CLIPS` | `<root>/ClipsForInference` | `/data/ClipsForInference` |
 | `-python` | `CKWEB_PYTHON` | `<root>/venv/bin/python`, else `python3` | `/data/venv/bin/python` |
 | `-ffmpeg` | `CKWEB_FFMPEG` | `ffmpeg` | `ffmpeg` |
 | `-aria2` | `CKWEB_ARIA2` | `aria2c` — `off` forces the one-stream fallback | `aria2c` |
+| `-bootstrap` | `CKWEB_BOOTSTRAP` | `/usr/local/bin/bootstrap.sh` — builds the inference stack | same |
 | `-token` | `CKWEB_TOKEN` | empty — **no auth**; `auto` generates one and logs it | unset |
 | `-max-upload-gb` | — | `16` | `16` |
 

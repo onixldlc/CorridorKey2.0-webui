@@ -130,8 +130,17 @@ func (q *Queue) worker(lane string) {
 // Submit queues a keying action.
 func (q *Queue) Submit(action, clip string, p Params) *Job {
 	j := q.add(&Job{Lane: LaneGPU, Action: action, Clip: clip, Params: p,
-		Provider: activeProvider.ID()})
+		Provider: activeProvider().ID()})
 	q.lanes[LaneGPU] <- j
+	return j
+}
+
+// SubmitBootstrap queues the one-time build of the inference stack. It shares
+// the net lane with the weights, so the 3.1 GiB of wheels and the 4.7 GiB of
+// checkpoints do not fight each other for the link.
+func (q *Queue) SubmitBootstrap() *Job {
+	j := q.add(&Job{Lane: LaneNet, Action: "bootstrap"})
+	q.lanes[LaneNet] <- j
 	return j
 }
 
@@ -184,6 +193,17 @@ func (q *Queue) isRunning(clip string) bool {
 	return j != nil && (j.Clip == "" || j.Clip == clip)
 }
 
+func (q *Queue) isBootstrapping() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, j := range q.jobs {
+		if j.Action == "bootstrap" && (j.State == "queued" || j.State == "running") {
+			return true
+		}
+	}
+	return false
+}
+
 func (q *Queue) isInstalling(key string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -233,17 +253,20 @@ func (q *Queue) run(j *Job) {
 	switch j.Action {
 	case "install":
 		err = install(ctx, j.Module, j.append)
+	case "bootstrap":
+		err = runBootstrap(ctx, j.append)
 	case "generate_alphas", "run_inference":
-		if activeProvider == nil {
+		p := activeProvider()
+		if p == nil {
 			err = errNoProvider
 			break
 		}
-		if ok, why := activeProvider.Ready(); !ok {
-			j.append("provider " + activeProvider.ID() + " is not ready: " + why)
+		if ok, why := p.Ready(); !ok {
+			j.append("provider " + p.ID() + " is not ready: " + why)
 			err = errNotReady
 			break
 		}
-		err = activeProvider.Run(ctx, j.Action, j.Clip, j.Params, j.append)
+		err = p.Run(ctx, j.Action, j.Clip, j.Params, j.append)
 	default:
 		err = errUnknownAction
 	}
@@ -269,8 +292,11 @@ func (q *Queue) run(j *Job) {
 	j.append("— " + state + " —")
 	broadcast(event{Kind: "job", JobID: j.ID})
 	broadcast(event{Kind: "clips"})
-	if j.Action == "install" {
+	if j.Action == "install" || j.Action == "bootstrap" {
 		broadcast(event{Kind: "modules"})
+		// The keyer may have become runnable just now, and a box that
+		// provisioned itself should not need a restart to notice.
+		refreshProvider()
 	}
 }
 

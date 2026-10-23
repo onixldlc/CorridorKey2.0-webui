@@ -31,9 +31,10 @@ type Config struct {
 	Python    string // interpreter inside the project venv
 	FFmpeg    string // ffmpeg binary, for extraction and export
 	Aria2     string // aria2c binary for module downloads; "off" forces the Go path
+	Bootstrap string // script that builds the inference stack in the volume
 	Token     string // shared secret; empty disables auth
 	MaxUpload int64  // bytes
-	Mode      string // auto | dev | prod
+	Mode      string // auto | dev | prod | manual
 	Dev       bool   // dev run: mock provider, no downloads
 	Version   string // from the VERSION file, stamped at build time
 }
@@ -46,12 +47,13 @@ var cfg Config
 func main() {
 	flag.StringVar(&cfg.Addr, "addr", env("CKWEB_ADDR", ":8080"), "listen address")
 	flag.StringVar(&cfg.Root, "root", env("CKWEB_ROOT", "/data"), "data root: clips, and where modules install to")
-	flag.StringVar(&cfg.Mode, "mode", env("CKWEB_MODE", "auto"), "auto | dev | prod — dev forces the mock provider and blocks downloads")
+	flag.StringVar(&cfg.Mode, "mode", env("CKWEB_MODE", "auto"), "auto | dev | prod | manual — dev forces the mock provider and blocks downloads, manual turns off self-provisioning")
 	providerFlag := flag.String("provider", env("CKWEB_PROVIDER", "auto"), "auto | corridorkey | mock")
 	flag.StringVar(&cfg.ClipsDir, "clips", env("CKWEB_CLIPS", ""), "clips dir (default <root>/ClipsForInference)")
 	flag.StringVar(&cfg.Python, "python", env("CKWEB_PYTHON", ""), "python binary (default <root>/venv/bin/python)")
 	flag.StringVar(&cfg.FFmpeg, "ffmpeg", env("CKWEB_FFMPEG", "ffmpeg"), "ffmpeg binary")
 	flag.StringVar(&cfg.Aria2, "aria2", env("CKWEB_ARIA2", "aria2c"), "aria2c binary for module downloads; \"off\" uses the single-stream Go downloader")
+	flag.StringVar(&cfg.Bootstrap, "bootstrap", env("CKWEB_BOOTSTRAP", "/usr/local/bin/bootstrap.sh"), "script that builds the inference stack in the volume")
 	flag.StringVar(&cfg.Token, "token", env("CKWEB_TOKEN", ""), "shared access token; \"auto\" generates one and prints it (empty = open, localhost only)")
 	maxGB := flag.Int64("max-upload-gb", 16, "largest accepted upload, in GB")
 	flag.Parse()
@@ -74,11 +76,12 @@ func main() {
 	if cfg.Dev {
 		*providerFlag = "mock"
 	}
+	providerChoice = *providerFlag
 	p, why := pickProvider(*providerFlag)
 	if p == nil {
 		log.Fatalf("provider: %s", why)
 	}
-	activeProvider = p
+	setProvider(p)
 
 	ui, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -91,6 +94,7 @@ func main() {
 	mux.HandleFunc("/api/modules", handleModules)
 	mux.HandleFunc("/api/modules/", handleModuleRoutes)
 	mux.HandleFunc("/api/providers", handleProviders)
+	mux.HandleFunc("/api/provision", handleProvision)
 	mux.HandleFunc("/api/clips", handleClips)
 	mux.HandleFunc("/api/clips/", handleClipRoutes)
 	mux.HandleFunc("/api/upload", handleUpload)
@@ -119,6 +123,10 @@ func main() {
 	} else {
 		log.Printf("  fetch    single-stream Go downloader — %s not on PATH, installs will be slow", cfg.Aria2)
 	}
+	// Last, so the decision is printed under the rest of the banner, and after
+	// the queue is running so the jobs it files have a worker to pick them up.
+	logProvision(autoProvision())
+
 	if cfg.Token == "" {
 		log.Printf("  auth     DISABLED — bind to localhost and tunnel, or set CKWEB_TOKEN")
 		log.Printf("  open     %s", pageURL(cfg.Addr, ""))
@@ -218,7 +226,8 @@ func logging(next http.Handler) http.Handler {
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	ready, detail := activeProvider.Ready()
+	ap := activeProvider()
+	ready, detail := ap.Ready()
 	fetcher := "go"
 	if _, ok := aria2Available(); ok {
 		fetcher = fmt.Sprintf("aria2c x%d", aria2MaxConn)
@@ -233,9 +242,10 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		"gpu":           gpuInfo(),
 		"auth":          cfg.Token != "",
 		"fetcher":       fetcher,
-		"provider":      activeProvider.ID(),
-		"providerTitle": activeProvider.Title(),
+		"provider":      ap.ID(),
+		"providerTitle": ap.Title(),
 		"providerReady": ready,
 		"providerWhy":   detail,
+		"provision":     provisionStatus(),
 	})
 }

@@ -21,6 +21,22 @@ func handleProviders(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, providerInfo())
 }
 
+// handleProvision reports the self-provisioning decision, and on POST makes
+// it again. The retry is the point: a box that was short of disk, or had not
+// brought up its GPU yet, becomes a production box without a restart.
+func handleProvision(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, provisionStatus())
+	case http.MethodPost:
+		p := autoProvision()
+		logProvision(p)
+		writeJSON(w, p)
+	default:
+		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
+	}
+}
+
 func handleModules(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, moduleStates())
 }

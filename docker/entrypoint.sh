@@ -40,11 +40,12 @@ elif [ ! -f "$ROOT/infer.py" ]; then
 	printf 'ck-web: no infer.py at %s — the mock provider will be used.\n' "$ROOT"
 	printf '        Something has overmounted the runtime; CKWEB_ROOT must point at a checkout.\n'
 else
-	# Backgrounded so the page and the log are reachable immediately. On a
-	# volume that already has the stack this returns in about a second; on a
-	# fresh one it downloads 3.3 GB and the keyer reports itself not ready
-	# until it finishes.
-	/usr/local/bin/bootstrap.sh 2>&1 &
+	# Nothing to do: ck-web provisions the box itself. If it finds a GPU and
+	# the disk to finish, it queues bootstrap.sh and every missing weight on
+	# its net lane at startup, so the whole download is visible in the
+	# browser log rather than only on this console. -mode manual turns that
+	# off and leaves the Modules page in charge.
+	:
 fi
 
 exec /usr/local/bin/ck-web "$@"

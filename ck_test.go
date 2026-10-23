@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -190,5 +191,109 @@ func TestExcludeDropsTheDuplicateCradioWeight(t *testing.T) {
 	}
 	if m.skip("model.safetensors") {
 		t.Error("the weight the runtime actually reads would be skipped")
+	}
+}
+
+// TestEveryModuleDeclaresWhatItCosts — the provisioning gate adds these up to
+// decide whether the volume can hold what is missing. A zero would make a
+// full disk look free.
+func TestEveryModuleDeclaresWhatItCosts(t *testing.T) {
+	for _, m := range modules {
+		if m.Need <= 0 {
+			t.Errorf("module %q does not declare Need", m.Key)
+		}
+	}
+}
+
+// TestProvisionDecision pins the two gates the operator asked for — a GPU and
+// the disk to finish — plus the cases where self-provisioning must stay out of
+// the way.
+func TestProvisionDecision(t *testing.T) {
+	ok := Provision{Mode: "auto", GPUs: 1, Missing: []string{"corridorkey2"},
+		Disks: []DiskNeed{{What: "weights", Path: "/data", Need: 10 << 30, Free: 60 << 30}}}
+
+	if auto, why := provisionDecision(ok); !auto {
+		t.Errorf("a GPU box with room declined to provision: %s", why)
+	}
+
+	noGPU := ok
+	noGPU.GPUs = 0
+	if auto, _ := provisionDecision(noGPU); auto {
+		t.Error("provisioned a box with no GPU")
+	}
+
+	full := ok
+	full.Disks = []DiskNeed{{What: "weights", Path: "/data", Need: 10 << 30, Free: 9 << 30}}
+	if auto, _ := provisionDecision(full); auto {
+		t.Error("provisioned a box that cannot hold the download")
+	}
+
+	unknown := ok
+	unknown.Disks = []DiskNeed{{What: "weights", Path: "/data", Need: 1, Free: -1}}
+	if auto, _ := provisionDecision(unknown); auto {
+		t.Error("provisioned a box whose free space could not be read")
+	}
+
+	dev := ok
+	dev.Mode = "dev"
+	if auto, _ := provisionDecision(dev); auto {
+		t.Error("a dev run started a download")
+	}
+
+	manual := ok
+	manual.Mode = "manual"
+	if auto, _ := provisionDecision(manual); auto {
+		t.Error("-mode manual started a download")
+	}
+
+	done := Provision{Mode: "auto", GPUs: 1, Stack: true, Missing: []string{}}
+	if auto, why := provisionDecision(done); auto {
+		t.Errorf("re-provisioned an already complete box: %s", why)
+	}
+}
+
+// TestFoldNeedsSumsOneFilesystem — in the image the stack, the weights and the
+// clips all land on /data. Checking each against the same free-space figure
+// would pass a disk that cannot hold the three together.
+func TestFoldNeedsSumsOneFilesystem(t *testing.T) {
+	dir := t.TempDir()
+	got := foldNeeds([]DiskNeed{
+		{What: "a", Path: dir, Need: 1 << 30},
+		{What: "b", Path: filepath.Join(dir, "sub", "deeper"), Need: 2 << 30},
+	})
+	if len(got) != 1 {
+		t.Fatalf("two targets on one filesystem folded into %d entries", len(got))
+	}
+	if got[0].Need != 3<<30 {
+		t.Errorf("folded need = %d, want %d", got[0].Need, int64(3)<<30)
+	}
+	if got[0].Free <= 0 {
+		t.Errorf("free space on %s came back as %d", dir, got[0].Free)
+	}
+}
+
+// TestProvisionPlanIsReadOnly guards the startup path: measuring the box must
+// never be what creates the directories it is measuring.
+func TestProvisionPlanIsReadOnly(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cfg.Root = filepath.Join(t.TempDir(), "nothing-here")
+	cfg.ClipsDir = filepath.Join(cfg.Root, "ClipsForInference")
+	cfg.Python = filepath.Join(cfg.Root, "venv", "bin", "python")
+
+	p := planProvision()
+	if _, err := os.Stat(cfg.Root); err == nil {
+		t.Error("planProvision created the data root")
+	}
+	if p.Stack {
+		t.Error("an empty root reported the inference stack as present")
+	}
+	if len(p.Missing) != len(modules) {
+		t.Errorf("an empty root is missing %d modules, want %d", len(p.Missing), len(modules))
+	}
+	for _, d := range p.Disks {
+		if d.Free <= 0 {
+			t.Errorf("%s: free space %d — statfs did not walk up to an existing parent", d.Path, d.Free)
+		}
 	}
 }

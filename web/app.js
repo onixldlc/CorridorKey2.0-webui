@@ -451,8 +451,8 @@ function renderQueue(body) {
       <span class="id">#${j.id}</span>
       <span class="badge ${cls}">${j.state}</span>
       <span class="mono-label" style="color:var(--muted)">${
-        { run_inference: "KEY", generate_alphas: "ALPHA", install: "FETCH" }[j.action] || esc(j.action)}</span>
-      <span>${esc(j.clip || j.module || "all clips")}</span>
+        { run_inference: "KEY", generate_alphas: "ALPHA", install: "FETCH", bootstrap: "SETUP" }[j.action] || esc(j.action)}</span>
+      <span>${esc(j.clip || j.module || (j.action === "bootstrap" ? "inference stack" : "all clips"))}</span>
       ${j.provider ? `<span class="hud-label">via ${esc(j.provider)}</span>` : ""}
       <div class="spacer"></div>
       ${j.state === "running" || j.state === "queued" ? `<button class="btn-mono btn-ghost btn-danger" data-cancel="${j.id}">Cancel</button>` : ""}`;
@@ -503,7 +503,8 @@ function renderModules(body) {
   provs.insertAdjacentHTML("beforeend", `
     <p class="hint" style="margin-top:10px">A provider is whatever does the keying. Pick one at startup with
     <code>-provider</code>; <code>auto</code> uses the real keyer when the checkout and its checkpoint are
-    present and the mock otherwise. <code>-mode dev</code> pins the mock and blocks every download.</p>`);
+    present and the mock otherwise. <code>-mode dev</code> pins the mock and blocks every download, and <code>-mode manual</code>
+    leaves every download to the buttons below.</p>`);
   body.append(provs);
 
   body.insertAdjacentHTML("beforeend", `
@@ -516,6 +517,8 @@ function renderModules(body) {
          cancelled install resumes where it stopped.</p>`
       : `<p class="hint"><span class="badge badge-warn">slow</span> No <code>aria2c</code> on PATH, so each
          file comes down over one connection. Install it on the host, or use the image, to saturate the link.</p>`)}`);
+
+  renderProvision(body);
 
   const t = document.createElement("table");
   t.className = "models";
@@ -566,6 +569,50 @@ function renderModules(body) {
     }
   });
   body.append(t);
+}
+
+// renderProvision explains the one thing an operator on a rented box should
+// not have to work out from four missing rows: whether this machine decided
+// it is a production box, and if not, what stopped it.
+function renderProvision(body) {
+  const h = state.health || {};
+  const p = h.provision || {};
+  const disks = (p.disks || [])
+    .map((d) => `<div class="hud-label">${esc(d.path)} — ${fmtBytes(d.need)} wanted for ${esc(d.what)}, ${
+      d.free < 0 ? "free space unknown" : `${fmtBytes(d.free)} free`}</div>`)
+    .join("");
+
+  const box = document.createElement("div");
+  box.className = "hint";
+  box.setAttribute("style", "display:flex;flex-direction:column;gap:8px;margin:12px 0");
+  box.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span class="badge ${p.auto ? "badge-good" : "badge-warn"}">${p.auto ? "automatic" : "manual"}</span>
+      <span>${esc(p.reason || "setup has not been decided yet")}</span>
+    </div>
+    <div class="hud-label">${p.gpus || 0} GPU(s) · inference stack ${p.stack ? "built" : "not built"} · ${
+      (p.missing || []).length} weight(s) missing${p.jobs && p.jobs.length ? ` · jobs ${p.jobs.join(", ")}` : ""}</div>
+    ${disks}
+    <div><button class="btn-mono" id="provision-now" ${h.dev ? "disabled" : ""}>Set this box up</button></div>`;
+
+  box.querySelector("#provision-now").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const r = await api("/api/provision", { method: "POST" });
+      toast(r.reason || "", !r.auto);
+      await Promise.all([loadHealth(), loadModules(), loadJobs()]);
+      if (r.jobs && r.jobs.length) {
+        state.job = r.jobs[0];
+        go("queue");
+        await loadLog();
+      }
+      render();
+    } catch (err) {
+      toast(String(err.message || err), true);
+      e.target.disabled = false;
+    }
+  });
+  body.append(box);
 }
 
 function renderAbout(body) {
@@ -657,7 +704,7 @@ function listen() {
       return;
     }
     if (e.kind === "modules") {
-      loadModules().then(() => {
+      Promise.all([loadModules(), loadHealth()]).then(() => {
         if (state.page === "modules") render();
       });
       return;

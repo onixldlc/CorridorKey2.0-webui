@@ -37,6 +37,9 @@ func (CorridorKey2Provider) Ready() (bool, string) {
 	}
 	if _, err := exec.LookPath(cfg.Python); err != nil {
 		if _, err := os.Stat(cfg.Python); err != nil {
+			if queue.isBootstrapping() {
+				return false, "the inference stack is still downloading into " + venvDir()
+			}
 			return false, "no interpreter at " + cfg.Python + " (the venv is what has torch)"
 		}
 	}
@@ -45,6 +48,9 @@ func (CorridorKey2Provider) Ready() (bool, string) {
 			continue
 		}
 		if !m.state().Present {
+			if queue.isInstalling(m.Key) {
+				return false, m.Title + " is still downloading"
+			}
 			return false, m.Title + " is not downloaded yet — install it on the Modules page"
 		}
 	}

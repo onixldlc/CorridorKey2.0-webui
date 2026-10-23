@@ -30,6 +30,12 @@ type Module struct {
 	Source   string `json:"source"` // the human-readable page
 	Size     string `json:"size"`
 	Required bool   `json:"required"`
+
+	// Need is what this module costs on disk: the sum of the published file
+	// sizes at the pinned revision, less whatever Exclude drops. It is only
+	// used to decide whether the box can provision itself without filling
+	// the volume, so it is an estimate, not a contract.
+	Need int64 `json:"need"`
 	Dest     string `json:"dest"` // relative to -root
 
 	// Exactly one of these describes what to fetch.
@@ -60,7 +66,7 @@ var modules = []Module{
 		Key: "corridorkey2", Title: "CorridorKey 2.0",
 		Note:   "The keyer. One model for both green and blue — there is no separate blue checkpoint any more.",
 		Source: "https://huggingface.co/nikopueringer/CorridorKey2.0",
-		Size:   "2.66 GB", Required: true,
+		Size:   "2.66 GB", Required: true, Need: 2539 * mib,
 		Dest:   "weights",
 		Repo:   "nikopueringer/CorridorKey2.0",
 		Files:  []string{"corridorkey_v2.safetensors", "foundation_stats.safetensors"},
@@ -70,7 +76,7 @@ var modules = []Module{
 		Key: "cradio", Title: "C-RADIOv4-SO400M",
 		Note:   "Frozen vision backbone from NVIDIA. Runs on every pass; not optional.",
 		Source: "https://huggingface.co/nvidia/C-RADIOv4-SO400M",
-		Size:   "1.73 GB", Required: true,
+		Size:   "1.73 GB", Required: true, Need: 1646 * mib,
 		Dest:    "vfms/cradio/C-RADIOv4-SO400M",
 		Repo:    "nvidia/C-RADIOv4-SO400M",
 		Rev:     "c0457f5dc26ca145f954cd4fc5bb6114e5705ad8",
@@ -81,7 +87,7 @@ var modules = []Module{
 		Key: "moge", Title: "MoGe-2 ViT-B",
 		Note:   "Frozen geometry model from Microsoft. Runs on every pass; not optional.",
 		Source: "https://huggingface.co/Ruicheng/moge-2-vitb-normal",
-		Size:   "419 MB", Required: true,
+		Size:   "419 MB", Required: true, Need: 400 * mib,
 		Dest:   "vfms/moge",
 		Repo:   "Ruicheng/moge-2-vitb-normal",
 		Rev:    "ca5f0e07ff01d3e5a364c1d954ed12ee1814b368",
@@ -92,7 +98,7 @@ var modules = []Module{
 		Key: "rvm", Title: "RVM small",
 		Note:   "Frozen temporal model from Google DeepMind. The only weight not hosted on Hugging Face.",
 		Source: "https://github.com/google-deepmind/representations4d",
-		Size:   "270 MB", Required: true,
+		Size:   "270 MB", Required: true, Need: 258 * mib,
 		Dest: "vfms/rvm",
 		Files: []string{
 			"https://storage.googleapis.com/representations4d/checkpoints/pretrain_rvm_small16_256_204031069.npz",
