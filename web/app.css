@@ -278,6 +278,15 @@ table.models td { padding: 10px; border-bottom: 1px solid var(--line); vertical-
 table.models td.hud-label { white-space: nowrap; }
 table.models tr:hover td { background: var(--wash); }
 .hint { color: var(--muted); max-width: 72ch; }
+/* The About page's facts-about-this-box table: what is actually running, read
+   from /api/health rather than written down and left to rot. */
+.kv { border-collapse: collapse; width: 100%; }
+.kv td {
+  padding: 4px 10px 4px 0;
+  border-top: 1px solid var(--line);
+  vertical-align: top;
+}
+.kv td:first-child { width: 12ch; white-space: nowrap; }
 .hint code {
   background: var(--ui-sunken); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 1px 5px; font: 400 12px/1.4 var(--font-mono);

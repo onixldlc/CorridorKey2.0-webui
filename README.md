@@ -110,6 +110,29 @@ Or straight from source — one binary, no build step for the front end, no
 go build -o ck-web . && ./ck-web -mode dev
 ```
 
+### Rootless podman without a systemd user session
+
+If `podman` answers with `crun: sd-bus call: Interactive authentication
+required` and `Failed to connect to bus: /run/user/1000/bus: connection
+refused`, the user’s `systemd --user` manager is not running — common on a box
+reached over SSH where the account has no lingering session. podman defaults to
+the systemd cgroup manager, which needs that bus, so every container fails to
+start. Either fix the session:
+
+```bash
+sudo loginctl enable-linger "$USER"   # then log out and back in
+```
+
+or tell podman not to use systemd, which needs no root:
+
+```bash
+mkdir -p ~/.config/containers
+printf '[engine]
+cgroup_manager = "cgroupfs"
+events_logger = "file"
+'   >> ~/.config/containers/containers.conf
+```
+
 ### On a rented GPU box
 
 The image is self-contained: the keyer, PyTorch and the UI are all in it.

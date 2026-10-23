@@ -701,28 +701,69 @@ function renderProvision(body) {
 }
 
 function renderAbout(body) {
+  const h = state.health || {};
+  const gpu = (h.gpu && h.gpu.length) ? h.gpu.map((g) => g.name).join(", ") : "none detected";
+  const weights = state.modules.filter((m) => m.required);
+  const have = weights.filter((m) => m.present).length;
+
   body.insertAdjacentHTML("beforeend", `
     <div class="hint" style="display:flex;flex-direction:column;gap:12px">
       <p><b>ck-web</b> is a browser front end for
-      <a href="https://github.com/nikopueringer/CorridorKey" target="_blank" rel="noreferrer noopener">CorridorKey</a>
-      as packaged by <a href="https://github.com/EvanRuiz/EZ-CorridorKey" target="_blank" rel="noreferrer noopener">EZ-CorridorKey</a>.
-      It does not reimplement the keyer: every job here runs the project's own
-      <code>clip_manager.py</code> and reads back what that writes.</p>
-      <p>The pipeline is three steps on disk:</p>
+      <a href="https://github.com/nikopueringer/CorridorKey2.0" target="_blank" rel="noreferrer noopener">CorridorKey 2.0</a>
+      by Corridor Digital. It does not reimplement the keyer: every key here shells out to the
+      project's own <code>infer.py</code> and reads back what that writes.</p>
+
+      <p>One job, done properly — <b>a plate, and an optional rough mask, in; a refined matte out.</b>
+      It is not a compositor. There is no node graph, no timeline and no colour pipeline; this exists
+      to hand the software you already use a clean matte.</p>
+
+      <p>What that looks like on disk:</p>
       <ol>
-        <li><code>ClipsForInference/&lt;clip&gt;/Input.mov</code> — the plate you upload.</li>
-        <li><code>AlphaHint/</code> — a coarse matte, from GVM (<i>Generate alpha hint</i>) or your own
-        file named <code>alphaHint.mov</code>.</li>
-        <li><code>Output/{Comp,Matte,FG,Processed}</code> — what the keyer writes. Comp is 8-bit PNG,
-        the rest are half-float EXR (DWAB), converted to PNG on the fly for this viewer.</li>
+        <li><code>ClipsForInference/&lt;clip&gt;/Input.&lt;ext&gt;</code> — the plate you upload.</li>
+        <li><code>AlphaHint/</code> — optional. 2.0 has no separate hint pass: a hint is an input to the
+        key itself, passed as <code>--hint_video</code>. Name an upload <i>alphaHint</i> to supply one.</li>
+        <li><code>Output/Matte/</code> — the matte, as half-float EXR, unclamped and scene-linear.
+        <code>infer.py</code> is asked for <code>--outputs alpha</code> and nothing else.</li>
       </ol>
+
+      <p>The <b>Preview</b> tab is the only composition here, and it is built by this server rather than
+      by the model: the plate frame and the matte frame are blended over a checkerboard or a flat colour
+      on request, with the <i>Despill</i> slider applied as upstream applies it. Nothing is written to disk
+      for it. Browsers cannot read EXR, so every frame you see went through ffmpeg on the way.</p>
+
+      <p>Keying is done by a <b>provider</b>, and the weights it needs are <b>modules</b> fetched at runtime —
+      the image carries the code and the setup machinery, not the 5.1 GB of checkpoints or the 3.3 GB of
+      PyTorch. On a box with a CUDA GPU and the disk to finish, ck-web provisions itself at startup: the
+      inference stack first, then every missing weight, all on the download lane so the GPU is never held
+      up by a fetch. It also sizes the GPU window itself from a measured table before each key, and will
+      resize a plate that cannot fit the card rather than running out of memory twenty minutes in.</p>
+
+      <p>The <i>mock</i> provider keys with a plain green-excess formula in Go. It is enough to exercise
+      every screen here without a GPU, a Python install or a single downloaded byte — and it writes a
+      matte only, like the real one.</p>
+
       <p>The UI follows ArtCraft's design system — the colours, type and metrics are the ones
       <a href="https://github.com/storytold/artcraft" target="_blank" rel="noreferrer noopener">storytold/artcraft</a>
       documents in <code>artcraft-native/src/theme.rs</code>. CorridorKey's own interface is left alone.</p>
-      <p>Keying is done by a <b>provider</b>, and the models it needs are <b>modules</b> fetched at runtime.
-      The image carries neither — it is the interface and the setup machinery, nothing else. The
-      <i>mock</i> provider keys with a plain green-excess formula in Go, which is enough to exercise every
-      screen here without a GPU, a Python install or a single downloaded byte.</p>
+
+      <p><b>Licence.</b> CorridorKey Licence v2.0 — CC BY-NC-SA 4.0 plus additional terms,
+      © Corridor Digital LLC, unchanged from upstream. Keying your own shots on a box you rent is
+      permitted, including for paid work, and what you produce is yours (§1). <b>Selling access to this
+      as an inference service is not</b> (§2b), derivatives must stay free to the public (§2c), and
+      organisations over $20M revenue need a purchased seat (§3). The foundation models carry their own
+      licences, which travel with them at <code>THIRD_PARTY_NOTICES.md</code>. Read the licence; that is a
+      plain reading, not legal advice.</p>
+
+      <table class="kv">
+        <tr><td class="hud-label">ck-web</td><td><code>${esc(h.version || "—")}</code></td></tr>
+        <tr><td class="hud-label">mode</td><td><code>${esc(h.mode || "—")}</code></td></tr>
+        <tr><td class="hud-label">provider</td><td><code>${esc(h.provider || "—")}</code> — ${esc(h.providerWhy || "")}</td></tr>
+        <tr><td class="hud-label">checkout</td><td><code>${esc(h.root || "—")}</code></td></tr>
+        <tr><td class="hud-label">gpu</td><td>${esc(gpu)}</td></tr>
+        <tr><td class="hud-label">weights</td><td>${have} of ${weights.length} present</td></tr>
+        <tr><td class="hud-label">fetcher</td><td><code>${esc(h.fetcher || "—")}</code></td></tr>
+      </table>
+
       <p class="hud-label">ONE GPU JOB AT A TIME · DOWNLOADS RUN IN THEIR OWN LANE</p>
     </div>`);
 }
