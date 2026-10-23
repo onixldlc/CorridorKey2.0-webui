@@ -480,6 +480,48 @@ second visit: 0  frame requests   (the whole sequence came from Cache Storage)
 The viewer is addressable now too — `#viewer:<clip>:<view>` — so a reload comes
 back to the frame you were looking at instead of to the clip list.
 
+### The player
+
+The scrubber has a transport: play/pause, a frame either way, and a loop
+toggle, with **space**, **←** and **→** bound to the same three. It runs at the
+plate’s own frame rate, which the clip list now reports from `ffprobe` (cached
+per file, so listing clips does not reprobe them).
+
+Playback is a timer over the cache, so a cached sequence plays without touching
+the server at all. A frame that has not been composited yet **holds the clock**
+rather than being skipped — the same thing a video player does with an empty
+buffer — and the coverage bar shows why it is waiting. Measured in a real
+browser on a 48-frame clip at 24 fps:
+
+```
+first pass : 1 → 21 in 1.5s, 12 frames rendered    (playing into the warmer)
+cached     : 1 → 38 in 1.5s, 0 frames rendered     (24.7 fps, all from cache)
+```
+
+Getting the second line took a fix worth naming: the coverage bar was rewriting
+every segment twice per frame, which on a 348-frame clip is 700 class writes at
+24 fps. It now repaints only the segments that changed, and the clock corrects
+for its own drift instead of adding `setTimeout`’s lateness to every frame.
+
+### Frames follow the page you are on
+
+Nothing is fetched for a sequence nobody is looking at. Leaving the viewer for
+the Queue, the Modules page or another clip stops the player, cancels every
+warm fetch in flight and clears the queue behind it; whatever reached the cache
+stays there. A browser tab pushed into the background does the same thing, on
+`visibilitychange`. Switching view or background starts a new sequence, and the
+old one’s object URLs are revoked rather than left to the garbage collector.
+
+Measured over CDP: with the viewer warming, switching to the Queue page gave
+**0 further frames rendered in the next five seconds**.
+
+`/api/health` carries the counters this is judged by, which is also the first
+place to look when a box feels busy:
+
+```json
+"frames": { "cached": 48, "bytes": 1017233, "rendered": 61, "workers": 4 }
+```
+
 ### One output, and a preview of it
 
 `infer.py` is run with `--outputs alpha --output_format exr`: the matte, and

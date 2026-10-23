@@ -40,6 +40,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // frameCacheBytes is the LRU's ceiling. A 1600-wide preview is a few hundred
@@ -63,6 +64,11 @@ var maxFrameRenders = func() int {
 }()
 
 var renderSem = make(chan struct{}, maxFrameRenders)
+
+// framesRendered counts conversions actually performed, as opposed to served
+// from the cache. It is in the health payload because "what is this box
+// doing" is otherwise guesswork: a scrubber gone wrong shows up here first.
+var framesRendered atomic.Int64
 
 // frameCacheControl lets the browser hold a frame for an hour without asking,
 // and revalidate cheaply after that. private, because a token in the URL is
@@ -135,6 +141,17 @@ func (c *frameCache) put(key string, f renderedFrame) {
 	}
 }
 
+// frameStats is what /api/health reports about frame serving.
+func frameStats() map[string]any {
+	n, used := frames.stats()
+	return map[string]any{
+		"cached":   n,
+		"bytes":    used,
+		"rendered": framesRendered.Load(),
+		"workers":  maxFrameRenders,
+	}
+}
+
 func (c *frameCache) stats() (int, int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -174,6 +191,7 @@ func renderOnce(key string, fn func() (renderedFrame, error)) (renderedFrame, er
 	flightMu.Unlock()
 
 	renderSem <- struct{}{}
+	framesRendered.Add(1)
 	fl.frame, fl.err = fn()
 	<-renderSem
 

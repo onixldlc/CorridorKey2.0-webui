@@ -192,9 +192,19 @@
 }
 .stage img, .stage video { max-width: 100%; max-height: 72vh; display: block; }
 .stage .empty { color: var(--faint); padding: 40px; text-align: center; }
-.scrub { display: flex; align-items: center; gap: 10px; }
-.scrub input[type="range"] { flex: 1; }
-.scrub .frame-no { font: 500 11px/1 var(--font-mono); color: var(--faint); min-width: 92px; text-align: right; }
+.scrub { display: flex; align-items: center; gap: 6px; }
+/* Transport. The same tab styling as the view bar, which is scoped to it. */
+.scrub .tab {
+  height: 26px; min-width: 30px; padding: 0 8px;
+  background: transparent; border: 1px solid var(--line); border-radius: var(--radius);
+  color: var(--dim);
+  font: 500 12px/1 var(--font-mono);
+  cursor: pointer;
+}
+.scrub .tab:hover { background: var(--wash-hover); color: var(--ink-strong); }
+.scrub .tab.on { background: var(--wash-selected); color: var(--ink-strong); }
+.scrub input[type="range"] { flex: 1; margin-left: 6px; }
+.scrub .frame-no { font: 500 11px/1 var(--font-mono); color: var(--faint); min-width: 150px; text-align: right; }
 
 /* Coverage: one segment per frame, lit when that frame has been rendered and
    cached. It is the compositing progress of the sequence, the way a player

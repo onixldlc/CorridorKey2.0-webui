@@ -444,9 +444,17 @@ const strip = {
   blobs: new Map(),        // url -> object URL, revoked when the strip changes
   want: 0,                 // the frame the user is actually on
   inFlight: null,          // AbortController of the cursor's own request
+  warmAbort: null,         // AbortController for everything being warmed
+  dirty: new Set(),        // coverage segments whose state changed
+  painted: -1,             // where the cursor marker currently is
   warmTimer: null,
   warming: false,
 };
+
+// The player. Frames come from the cache, so playback is a timer and an img
+// src; a frame that has not been rendered yet holds the clock rather than
+// being skipped, the way a video player waits on its buffer.
+const player = { playing: false, timer: null, loop: true };
 
 function stripKey() {
   const clip = state.clips.find((c) => c.name === state.selected) || {};
@@ -492,11 +500,31 @@ async function getFrame(url, signal) {
 // resetStrip drops what belonged to the previous sequence and reads back which
 // frames of the new one are already cached, so the coverage bar is right
 // before anything is fetched.
+// stopWarming drops everything being fetched for a sequence that is no longer
+// on screen. Opening another page, another clip or another view must not keep
+// the box rendering frames nobody is looking at — and neither must a tab the
+// browser has pushed into the background.
+function stopWarming() {
+  clearTimeout(strip.warmTimer);
+  strip.warmTimer = null;
+  if (strip.warmAbort) strip.warmAbort.abort();
+  strip.warmAbort = null;
+  strip.warming = false;
+  strip.pending.clear();
+  paintCoverage();
+}
+
+// warmingAllowed is the whole of the "only fetch for the page I am on" rule.
+function warmingAllowed() {
+  return state.page === "viewer" && !document.hidden && state.frames.length > 0;
+}
+
 async function resetStrip() {
+  stopPlay();
   for (const obj of strip.blobs.values()) URL.revokeObjectURL(obj);
   strip.blobs.clear();
   strip.covered.clear();
-  strip.pending.clear();
+  stopWarming();
   if (strip.inFlight) strip.inFlight.abort();
   strip.inFlight = null;
   strip.key = stripKey();
@@ -533,7 +561,17 @@ async function showFrame(i) {
   if (!img) return;
   const rev = clipRev();
 
-  if (state.view === "comp") {
+  // Already in hand: no request, no await, no placeholder. This is the path
+  // playback runs on, and it is why playback is smooth.
+  const have = strip.blobs.get(frameSrc(state.selected, state.view, i, state.bg, rev));
+  if (have) {
+    img.src = have;
+    img.classList.remove("placeholder");
+    paintCoverage();
+    return;
+  }
+
+  if (state.view === "comp" && !strip.covered.has(i)) {
     const matte = frameSrc(state.selected, "matte", i, state.bg, rev);
     try {
       const obj = await getFrame(matte);
@@ -549,10 +587,12 @@ async function showFrame(i) {
   strip.inFlight = new AbortController();
   const url = frameSrc(state.selected, state.view, i, state.bg, rev);
   strip.pending.add(i);
+  strip.dirty.add(i);
   paintCoverage();
   try {
     const obj = await getFrame(url, strip.inFlight.signal);
     strip.covered.add(i);
+    strip.dirty.add(i);
     if (strip.want === i) {
       img.src = obj;
       img.classList.remove("placeholder");
@@ -561,6 +601,7 @@ async function showFrame(i) {
     if (e.name !== "AbortError") toast(`Frame ${i + 1}: ${e.message}`, true);
   } finally {
     strip.pending.delete(i);
+    strip.dirty.add(i);
     paintCoverage();
     scheduleWarm();
   }
@@ -569,34 +610,40 @@ async function showFrame(i) {
 // scheduleWarm fills the cache forward from the cursor once the user has
 // stopped dragging. It never competes with the cursor: WARM_PARALLEL is small
 // and showFrame's own request is not one of them.
-function scheduleWarm() {
+function scheduleWarm(delay = 400) {
   clearTimeout(strip.warmTimer);
-  strip.warmTimer = setTimeout(warm, 400);
+  if (!warmingAllowed()) return;
+  strip.warmTimer = setTimeout(warm, delay);
 }
 
 async function warm() {
-  if (strip.warming || !state.frames.length) return;
+  if (strip.warming || !warmingAllowed()) return;
   strip.warming = true;
+  strip.warmAbort = new AbortController();
+  const signal = strip.warmAbort.signal;
   const mine = strip.key;
   const rev = clipRev();
   try {
+    // Forward from the cursor, wrapping once, because playback loops and the
+    // frames behind the cursor are the ones it comes back to.
     const todo = [];
-    for (let n = 0; n < WARM_AHEAD && todo.length < WARM_AHEAD; n++) {
-      const i = strip.want + n;
-      if (i >= state.frames.length) break;
+    for (let n = 0; n < state.frames.length && todo.length < WARM_AHEAD; n++) {
+      const i = (strip.want + n) % state.frames.length;
       if (!strip.covered.has(i) && !strip.pending.has(i)) todo.push(i);
     }
     while (todo.length) {
-      if (strip.key !== mine || state.page !== "viewer") return;
+      if (strip.key !== mine || !warmingAllowed() || signal.aborted) return;
       const batch = todo.splice(0, WARM_PARALLEL);
       await Promise.all(batch.map(async (i) => {
         strip.pending.add(i);
+        strip.dirty.add(i);
         paintCoverage();
         try {
-          await getFrame(frameSrc(state.selected, state.view, i, state.bg, rev));
+          await getFrame(frameSrc(state.selected, state.view, i, state.bg, rev), signal);
           strip.covered.add(i);
         } catch {} // a warm frame that fails is not worth a toast
         strip.pending.delete(i);
+        strip.dirty.add(i);
         paintCoverage();
       }));
     }
@@ -607,18 +654,35 @@ async function warm() {
 
 // paintCoverage draws the bar above the frame: which of the sequence has been
 // rendered and cached, which is being worked on, and where the cursor is.
-function paintCoverage() {
+// paintCoverage repaints only what changed. Playback calls this per frame, and
+// a 348-frame clip has 348 segments: rewriting all of them 24 times a second
+// is what held the player to half speed before.
+function paintCoverage(all = false) {
   const bar = document.querySelector(".coverage");
   if (!bar) return;
   const total = state.frames.length;
   if (!total) return;
-  for (const seg of bar.querySelectorAll(".seg")) {
-    const i = Number(seg.dataset.i);
+
+  const touch = all ? null : new Set(strip.dirty);
+  if (touch) {
+    if (strip.painted >= 0) touch.add(strip.painted);
+    touch.add(strip.want);
+  }
+  strip.dirty.clear();
+  strip.painted = strip.want;
+
+  const segs = bar.children;
+  const paint = (i) => {
+    const seg = segs[i];
+    if (!seg) return;
     seg.className = "seg"
       + (strip.covered.has(i) ? " on" : "")
       + (strip.pending.has(i) ? " busy" : "")
       + (i === strip.want ? " at" : "");
-  }
+  };
+  if (touch) touch.forEach(paint);
+  else for (let i = 0; i < total; i++) paint(i);
+
   const label = bar.parentElement && bar.parentElement.querySelector(".coverage-label");
   if (label) {
     label.textContent = state.view === "comp"
@@ -645,12 +709,84 @@ function coverageBar() {
   return wrap;
 }
 
+// ── the player ────────────────────────────────────────────────────────
+
+function playFPS() {
+  const clip = state.clips.find((c) => c.name === state.selected) || {};
+  return clip.fps > 0 ? clip.fps : 24;
+}
+
+function playToggle() {
+  if (player.playing) stopPlay();
+  else startPlay();
+}
+
+function startPlay() {
+  if (state.frames.length < 2 || state.page !== "viewer") return;
+  player.playing = true;
+  paintTransport();
+  scheduleWarm(0); // the player eats cache, so start filling it immediately
+  tickPlay(performance.now());
+}
+
+function stopPlay() {
+  player.playing = false;
+  clearTimeout(player.timer);
+  player.timer = null;
+  paintTransport();
+}
+
+function tickPlay(due) {
+  if (!player.playing) return;
+  let next = strip.want + 1;
+  if (next >= state.frames.length) {
+    if (!player.loop) return stopPlay();
+    next = 0;
+  }
+  // Hold the clock on a frame that has not been composited yet rather than
+  // skipping it — the same thing a video player does with an empty buffer. The
+  // coverage bar shows why it is waiting.
+  if (!strip.covered.has(next)) {
+    scheduleWarm(0);
+    // Waiting on the warmer, so the clock restarts from now rather than
+    // trying to catch up on frames that were never shown.
+    player.timer = setTimeout(() => tickPlay(performance.now()), 100);
+    return;
+  }
+  jumpTo(next);
+  // Against the clock, not against the last frame: setTimeout always runs a
+  // little late, and paying that cost every frame would drift the playback
+  // slower than the plate was shot.
+  const step = 1000 / playFPS();
+  const target = (due || performance.now()) + step;
+  const wait = Math.max(0, target - performance.now());
+  player.timer = setTimeout(() => tickPlay(target), wait);
+}
+
+function stepBy(n) {
+  stopPlay();
+  const total = state.frames.length;
+  if (!total) return;
+  jumpTo((strip.want + n + total) % total);
+}
+
+function paintTransport() {
+  const play = document.querySelector(".scrub .play");
+  if (play) {
+    play.textContent = player.playing ? "❚❚" : "▶";
+    play.title = player.playing ? "Pause (space)" : "Play (space)";
+    play.classList.toggle("on", player.playing);
+  }
+  const loop = document.querySelector(".scrub .loop");
+  if (loop) loop.classList.toggle("on", player.loop);
+}
+
 // jumpTo moves the cursor without re-rendering the page, so the scrubber keeps
 // its grab and the console keeps its scroll.
 function jumpTo(i) {
   state.frame = i;
   const no = document.querySelector(".scrub .frame-no");
-  if (no) no.textContent = `${i + 1} / ${state.frames.length}`;
+  if (no) no.textContent = `${i + 1} / ${state.frames.length} · ${playFPS().toFixed(2)} fps`;
   const range = document.querySelector(".scrub input");
   if (range && Number(range.value) !== i) range.value = i;
   paintCoverage();
@@ -729,16 +865,30 @@ function renderViewer(body) {
     const scrub = document.createElement("div");
     scrub.className = "scrub";
     scrub.innerHTML = `
-      <span class="hud-label">Frame</span>
+      <button class="tab step" title="Previous frame (left arrow)">⏪</button>
+      <button class="tab play" title="Play (space)">▶</button>
+      <button class="tab step fwd" title="Next frame (right arrow)">⏩</button>
+      <button class="tab loop" title="Loop">↺</button>
       <input type="range" min="0" max="${state.frames.length - 1}" value="${state.frame}">
-      <span class="frame-no">${state.frame + 1} / ${state.frames.length}</span>`;
-    scrub.querySelector("input").addEventListener("input", (e) => jumpTo(Number(e.target.value)));
+      <span class="frame-no">${state.frame + 1} / ${state.frames.length} · ${playFPS().toFixed(2)} fps</span>`;
+    scrub.querySelector("input").addEventListener("input", (e) => {
+      stopPlay(); // a hand on the scrubber wins over the clock
+      jumpTo(Number(e.target.value));
+    });
+    scrub.querySelector(".play").addEventListener("click", playToggle);
+    scrub.querySelector(".step").addEventListener("click", () => stepBy(-1));
+    scrub.querySelector(".step.fwd").addEventListener("click", () => stepBy(1));
+    scrub.querySelector(".loop").addEventListener("click", () => {
+      player.loop = !player.loop;
+      paintTransport();
+    });
     wrap.append(scrub);
+    paintTransport();
   }
   body.append(wrap);
 
   if (state.frames.length) {
-    const go = () => { paintCoverage(); showFrame(state.frame); };
+    const go = () => { paintCoverage(true); showFrame(state.frame); };
     if (strip.key !== stripKey()) resetStrip().then(go);
     else go();
   }
@@ -1044,6 +1194,13 @@ function hostOf(u) {
 // same box — comes back to the same frame of the same clip rather than to the
 // clip list.
 function go(page) {
+  if (page !== "viewer") {
+    // Leaving the viewer: nothing on another page needs frames, so the player
+    // stops and every warm fetch is dropped mid-flight. Whatever is already
+    // in the cache stays there.
+    stopPlay();
+    stopWarming();
+  }
   state.page = page;
   location.hash = page === "viewer" && state.selected
     ? `viewer:${encodeURIComponent(state.selected)}:${state.view}`
@@ -1117,6 +1274,35 @@ document.querySelectorAll(".sidebar .row").forEach((r) =>
 $("#refresh").addEventListener("click", refresh);
 $("#toggle-sidebar").addEventListener("click", () =>
   $("#app").classList.toggle("sidebar-closed"));
+// A background tab is not being watched, so it has no business rendering
+// frames. Both the player and the warmer stop until it comes back.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopPlay();
+    stopWarming();
+  } else if (state.page === "viewer") {
+    scheduleWarm(200);
+  }
+});
+
+// Space plays, the arrows step. Skipped while something is being typed into,
+// so the token gate and the clip-name field keep their keys.
+window.addEventListener("keydown", (e) => {
+  if (state.page !== "viewer" || e.metaKey || e.ctrlKey || e.altKey) return;
+  const tag = (e.target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return;
+  if (e.key === " ") {
+    e.preventDefault();
+    playToggle();
+  } else if (e.key === "ArrowLeft") {
+    e.preventDefault();
+    stepBy(-1);
+  } else if (e.key === "ArrowRight") {
+    e.preventDefault();
+    stepBy(1);
+  }
+});
+
 window.addEventListener("hashchange", () => {
   const h = readHash();
   if (!h) return;

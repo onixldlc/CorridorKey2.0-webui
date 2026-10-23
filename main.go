@@ -247,5 +247,6 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		"providerReady": ready,
 		"providerWhy":   detail,
 		"provision":     provisionStatus(),
+		"frames":        frameStats(),
 	})
 }

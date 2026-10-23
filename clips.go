@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Stage is how far a clip has travelled through the pipeline. It mirrors what
@@ -36,6 +37,9 @@ type Clip struct {
 	// re-keying a clip gives its frames new URLs and whatever a browser had
 	// cached under the old ones can be found and dropped.
 	Rev string `json:"rev"`
+	// FPS is the plate's frame rate, so the player runs the sequence at the
+	// speed it was shot rather than at a guess.
+	FPS float64 `json:"fps"`
 }
 
 var videoExt = map[string]bool{
@@ -109,7 +113,44 @@ func inspectClip(name string) Clip {
 	}
 	c.Running = queue.isRunning(name)
 	c.Rev = clipRev(dir, c)
+	c.FPS = plateFPS(dir, c)
 	return c
+}
+
+// plateFPS is the frame rate of the plate, remembered per file so that
+// listing the clips does not run ffprobe once per clip on every poll. A frame
+// directory has no rate of its own; infer.py assumes 24 for those, so this
+// agrees with it.
+var (
+	fpsMu   sync.Mutex
+	fpsSeen = map[string]float64{}
+)
+
+func plateFPS(dir string, c Clip) float64 {
+	if c.Input == "" || strings.HasSuffix(c.Input, "/") {
+		return 24
+	}
+	path := filepath.Join(dir, c.Input)
+	key := path + "@" + stampOf(path)
+
+	fpsMu.Lock()
+	fps, ok := fpsSeen[key]
+	fpsMu.Unlock()
+	if ok {
+		return fps
+	}
+
+	fps = 24
+	if info, err := probePlate(path); err == nil && info.FPS > 0 {
+		fps = info.FPS
+	}
+	fpsMu.Lock()
+	if len(fpsSeen) > 500 { // a clip list this long has bigger problems
+		fpsSeen = map[string]float64{}
+	}
+	fpsSeen[key] = fps
+	fpsMu.Unlock()
+	return fps
 }
 
 // clipRev identifies the current contents of a clip cheaply: how many matte
