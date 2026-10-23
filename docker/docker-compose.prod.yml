@@ -1,0 +1,36 @@
+# The real thing on a box with a GPU. The keyer and PyTorch are in the image;
+# CK_DATA only holds the venv, the ~5.1 GB of weights, the clips and their
+# output, so point it somewhere with room.
+#
+#   CK_DATA=/srv/ck-web docker compose -f docker/docker-compose.prod.yml up -d
+#
+# podman-compose does not pass a GPU through: `runtime: nvidia` is Docker's,
+# and podman wants a CDI device instead. Run it directly there:
+#
+#   podman run -d --name ck-web --device nvidia.com/gpu=all \
+#     -p 127.0.0.1:8080:8080 -e CKWEB_MODE=prod -e CKWEB_TOKEN=auto \
+#     -v /srv/ck-web:/data ghcr.io/onixldlc/corridorkey2-webui:latest
+services:
+  ck-web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: ck-web:latest
+    container_name: ck-web
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      CKWEB_MODE: "prod"
+      CKWEB_PROVIDER: "auto"
+      # "auto" generates a token at startup and prints it, with a ready-made
+      # ?t= link, in the container log: docker compose logs ck-web | grep open
+      # Export CKWEB_TOKEN to pin a fixed one instead.
+      CKWEB_TOKEN: "${CKWEB_TOKEN:-auto}"
+    ports:
+      # Localhost only. Tunnel in: ssh -L 8080:localhost:8080 user@gpu-box
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # Clips, weights and the venv. The runtime itself is in the image.
+      - "${CK_DATA:?set CK_DATA to a directory with room for the weights and your clips}:/data"
+    restart: unless-stopped

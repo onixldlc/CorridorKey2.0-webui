@@ -78,7 +78,10 @@ func (MockProvider) targets(clip, action string) ([]string, error) {
 				out = append(out, c.Name)
 			}
 		case "run_inference":
-			if c.Stage == StageReady || c.Stage == StageKeyed {
+			// Anything with a plate. A hint is an optional input in 2.0, so
+			// waiting for one here would contradict the Clips page, which
+			// calls a clip with a plate alone ready to key.
+			if c.Stage != StageEmpty {
 				out = append(out, c.Name)
 			}
 		}

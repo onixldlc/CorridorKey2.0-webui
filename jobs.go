@@ -288,9 +288,11 @@ func (q *Queue) run(j *Job) {
 			break
 		}
 		sink := j.append
-		if j.Action == "run_inference" && j.Clip != "" {
-			// A key is the only job long enough to need a bar, and the only
-			// one whose phases can be read out of what it prints.
+		if j.Action == "run_inference" && j.Clip != "" && p.ID() == "corridorkey2" {
+			// A key is the only job long enough to need a bar, and the
+			// phases come from what infer.py prints — so this follows the
+			// real keyer only. The mock would sit on "loading the model"
+			// for its whole run.
 			t := newCK2Tracker(j, ck2TempDir(j.Clip))
 			go t.watch(ctx)
 			sink = func(line string) {
