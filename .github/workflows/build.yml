@@ -99,9 +99,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The image carries PyTorch and the CUDA wheels, which is several GB more
-      # than a stock runner has comfortable room for once buildx has a cache
-      # and a loaded image as well.
+      # The image is small now that torch is fetched at run time, but buildx
+      # keeps a cache and a loaded image besides, and a stock runner is not
+      # generous. Cheap insurance.
       - name: Reclaim runner disk
         run: |
           df -h /
@@ -113,15 +113,14 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # One build, loaded locally, smoke tested and then pushed as-is. Building
-      # twice would mean fetching the torch wheels twice and keeping two copies
-      # of a multi-gigabyte image on the runner.
+      # One build, loaded locally, smoke tested and then pushed as-is. The
+      # image that passed the tests is the image that ships.
       - name: Build amd64
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile
-          # linux/amd64 only: the CUDA wheels this image installs have no
+          # linux/amd64 only: the CUDA wheels the bootstrap fetches have no
           # arm64 build, and neither does any box you would rent to run it.
           platforms: linux/amd64
           load: true
@@ -139,8 +138,8 @@ jobs:
 
       - name: Smoke test the image contents
         # The promise of this image: the UI, the keyer from the `upstream`
-        # branch and a working PyTorch — and not one byte of model weight.
-        # Assert it rather than trusting it.
+        # branch, and neither a model weight nor a gigabyte of torch. Assert
+        # it rather than trusting it.
         run: |
           set -euo pipefail
           docker run --rm --entrypoint sh "${IMAGE_NAME}:ci" -c '
@@ -158,11 +157,21 @@ jobs:
             cat /opt/corridorkey/.ck2-source-revision
             echo "corridorkey 2.0 runtime present"
 
-            python=/opt/venv/bin/python
-            [ -x "$python" ] || { echo "no venv in the image"; exit 1; }
-            "$python" -c "import torch, torchvision; print(\"torch\", torch.__version__, \"torchvision\", torchvision.__version__)"
-            "$python" -c "import cv2, transformers, timm, safetensors, utils3d; print(\"runtime deps import\")"
-            echo "inference stack present"
+            # torch is NOT in this image. It is fetched into the volume on
+            # first start, so what is asserted here is the machinery that
+            # does the fetching, and its absence from the image itself.
+            [ -x /usr/local/bin/bootstrap.sh ] || { echo "bootstrap.sh missing"; exit 1; }
+            [ -x /usr/local/bin/onstart.sh ] || { echo "onstart.sh missing"; exit 1; }
+            [ -r /usr/local/bin/wheels.py ] || { echo "wheels.py missing"; exit 1; }
+            python3 /usr/local/bin/wheels.py /tmp/w.txt
+            grep -q "^https://" /tmp/w.txt || { echo "wheels.py resolved no URLs"; exit 1; }
+            grep -c "checksum=sha-256=" /tmp/w.txt
+            ! grep -q "^triton" /tmp/w.txt || { echo "triton was not dropped"; exit 1; }
+            [ -s /tmp/w.txt.deps ] || { echo "no pure-python dep list"; exit 1; }
+            echo "bootstrap resolves the stack"
+
+            [ ! -d /opt/venv ] || { echo "torch leaked into the image"; exit 1; }
+            echo "no inference stack baked in"
 
             ffmpeg -hide_banner -version | head -1
             ffmpeg -hide_banner -decoders 2>/dev/null | grep -qw exr || {
@@ -225,8 +234,8 @@ jobs:
           fi
           echo "health answers"
 
-          # The startup banner names the pinned runtime and says whether torch
-          # saw a GPU. On a runner it will say cuda False, which is correct.
+          # The startup banner names the pinned runtime. A dev run needs no
+          # torch, so the bootstrap does not run and says nothing here.
           docker logs ck-web-ci 2>&1 | grep -E 'torch|sha ' || true
 
           curl -fsS "http://127.0.0.1:8080/api/health?t=ci-token" | tee /tmp/health.json
@@ -349,7 +358,7 @@ jobs:
           echo "**Version:** \`${V}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Published:** ${{ needs.determine-version.outputs.publish }}" >> $GITHUB_STEP_SUMMARY
           echo "**Image:** \`${IMG}:${V}\`, \`${IMG}:latest\` (linux/amd64)" >> $GITHUB_STEP_SUMMARY
-          echo "**Carries:** the UI, the keyer from the \`upstream\` branch, PyTorch, ffmpeg and aria2c — no weights" >> $GITHUB_STEP_SUMMARY
+          echo "**Carries:** the UI, the keyer from the \`upstream\` branch, ffmpeg and aria2c — no torch, no weights" >> $GITHUB_STEP_SUMMARY
           echo "**Dev run:** \`docker run -p 8080:8080 -e CKWEB_MODE=dev ${IMG}:${V}\`" >> $GITHUB_STEP_SUMMARY
 
   release:
@@ -377,9 +386,11 @@ jobs:
           body: |
             Web UI for CorridorKey 2.0, for keying on a rented GPU box.
 
-            The image carries the UI, the keyer from this fork's `upstream`
-            branch and a working PyTorch. It carries no model weights: the
-            Modules page fetches the ~5.1 GB at runtime, into the volume.
+            The image carries the UI and the keyer from this fork's
+            `upstream` branch, and little else. torch and its CUDA libraries
+            are fetched into the volume on first start, with aria2c, and kept
+            across image upgrades. The weights are the Modules page's job:
+            5.08 GB, also into the volume.
 
             ```
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.determine-version.outputs.version }}
