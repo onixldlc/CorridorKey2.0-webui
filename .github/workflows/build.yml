@@ -292,20 +292,54 @@ jobs:
           fi
           echo "mock keyer produced output"
 
-          # Every stage the viewer offers must actually have frames behind it.
-          for view in alpha comp matte fg processed; do
+          # Three sequences exist now: the hint that went in, the matte that
+          # came out, and the comp rendered from that matte on request.
+          for view in alpha matte comp; do
             curl -fsS "http://127.0.0.1:8080/api/clips/CiPlate/frames?view=${view}&t=ci-token" \
               | grep -q '"count":[1-9]' || { echo "no frames in ${view}"; exit 1; }
           done
-          echo "alpha, comp, matte, fg and processed all have frames"
+          echo "alpha, matte and comp all have frames"
 
-          # One frame really decodes as a PNG.
+          # The 1.x stages are not asked of the runtime any more. They must
+          # report empty rather than name a folder nothing writes.
+          for view in fg processed; do
+            curl -fsS "http://127.0.0.1:8080/api/clips/CiPlate/frames?view=${view}&t=ci-token" \
+              | grep -q '"count":0' || { echo "${view} is still being served"; exit 1; }
+          done
+          echo "fg and processed are gone"
+
+          # The plate is a video here, so it streams instead of paginating.
+          curl -fsS "http://127.0.0.1:8080/api/clips/CiPlate/input?t=ci-token" -o /tmp/plate.mp4
+          [[ -s /tmp/plate.mp4 ]] || { echo "the plate did not stream"; exit 1; }
+          echo "plate streams as a video"
+
+          # The matte stays lossless; a comp is a photograph, so it is a jpeg.
+          curl -fsS "http://127.0.0.1:8080/api/clips/CiPlate/frame?view=matte&i=0&t=ci-token" \
+            -o /tmp/matte.png
+          file /tmp/matte.png | grep -qi 'PNG image'
           curl -fsS "http://127.0.0.1:8080/api/clips/CiPlate/frame?view=comp&i=0&t=ci-token" \
-            -o /tmp/frame.png
-          file /tmp/frame.png | grep -qi 'PNG image'
-          echo "frame serves as a png"
+            -o /tmp/comp.jpg
+          file /tmp/comp.jpg | grep -qi 'JPEG image'
+          echo "matte serves as a png, comp as a jpeg"
 
-          # And the export path stitches it back into a file.
+          # The same comp asked for twice costs one render, not two.
+          etag=$(curl -fsS -D - -o /dev/null \
+            "http://127.0.0.1:8080/api/clips/CiPlate/frame?view=comp&i=0&t=ci-token" \
+            | awk 'tolower($1)=="etag:"{print $2}' | tr -d '\r')
+          [[ -n "${etag}" ]] || { echo "a frame came back without an ETag"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "If-None-Match: ${etag}" \
+            "http://127.0.0.1:8080/api/clips/CiPlate/frame?view=comp&i=0&t=ci-token")
+          if [[ "${code}" != "304" ]]; then
+            echo "expected 304 for a frame the browser already holds, got ${code}"; exit 1
+          fi
+          echo "a known frame answers 304"
+
+          # And the server accounts for what it rendered and kept.
+          curl -fsS "http://127.0.0.1:8080/api/health?t=ci-token" \
+            | grep -q '"frames":{"bytes":[1-9]' || { echo "the frame cache reports nothing"; exit 1; }
+          echo "the frame cache reports what it holds"
+
+          # And the export path stitches the comp back into a file.
           curl -fsS "http://127.0.0.1:8080/api/clips/CiPlate/export?view=comp&format=mp4&t=ci-token" \
             -o /tmp/out.mp4
           [[ -s /tmp/out.mp4 ]] || { echo "export produced nothing"; exit 1; }
