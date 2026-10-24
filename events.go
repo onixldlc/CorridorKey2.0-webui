@@ -35,6 +35,15 @@ func broadcast(e event) {
 	hub.Unlock()
 }
 
+// subscribers is how many pages are currently watching the stream. The
+// console says so on connect and disconnect: "nothing is happening" reads
+// very differently when nobody is attached to see it.
+func subscribers() int {
+	hub.Lock()
+	defer hub.Unlock()
+	return len(hub.subs)
+}
+
 func handleEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {

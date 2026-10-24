@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 //go:embed web
@@ -103,6 +105,7 @@ func main() {
 	mux.HandleFunc("/api/events", handleEvents)
 
 	queue.start()
+	go reportFrameTraffic()
 
 	if cfg.Token == "auto" {
 		cfg.Token = storedToken()
@@ -243,12 +246,134 @@ func auth(next http.Handler) http.Handler {
 	})
 }
 
+// logged wraps a response so the status and the size can be reported after
+// the handler has finished with it.
+type logged struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (w *logged) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *logged) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(b)
+	w.bytes += n
+	return n, err
+}
+
+// Flush and the rest are needed because the SSE handler asserts them.
+func (w *logged) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// frameTraffic collapses the scrubber's requests. A pass over a 348-frame
+// clip is 348 lines of identical shape; the interesting facts are how many
+// arrived, how many cost a render and how many were answered 304, so they are
+// counted and summarised instead of printed one by one.
+var frameTraffic struct {
+	sync.Mutex
+	n, served, notModified, failed int
+	bytes                          int
+}
+
+func countFrame(status, bytes int) {
+	frameTraffic.Lock()
+	frameTraffic.n++
+	switch {
+	case status == http.StatusNotModified:
+		frameTraffic.notModified++
+	case status >= 400:
+		frameTraffic.failed++
+	default:
+		frameTraffic.served++
+		frameTraffic.bytes += bytes
+	}
+	frameTraffic.Unlock()
+}
+
+// reportFrameTraffic prints one summary line while frames are moving, and
+// nothing at all when they are not.
+func reportFrameTraffic() {
+	for range time.Tick(5 * time.Second) {
+		frameTraffic.Lock()
+		n, served, nm, failed, b := frameTraffic.n, frameTraffic.served,
+			frameTraffic.notModified, frameTraffic.failed, frameTraffic.bytes
+		frameTraffic.n, frameTraffic.served, frameTraffic.notModified = 0, 0, 0
+		frameTraffic.failed, frameTraffic.bytes = 0, 0
+		frameTraffic.Unlock()
+		if n == 0 {
+			continue
+		}
+		st := frameStats()
+		line := fmt.Sprintf("frames   %d asked in 5s — %d sent (%s), %d from the browser cache",
+			n, served, humanBytes(int64(b)), nm)
+		if failed > 0 {
+			line += fmt.Sprintf(", %d failed", failed)
+		}
+		log.Printf("%s; server cache %v frames, %v rendered since boot",
+			line, st["cached"], st["rendered"])
+	}
+}
+
+// isFrameRequest matches /api/clips/<name>/frame, the one route the scrubber
+// hits hundreds of times in a row.
+func isFrameRequest(path string) bool {
+	return strings.HasPrefix(path, "/api/clips/") && strings.HasSuffix(path, "/frame")
+}
+
+// logging narrates the HTTP side. Everything but the frame flood gets a line
+// with its status, size and how long it took, because "the server went down"
+// and "the server answered 404 in 1 ms" look identical from a browser.
 func logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/events" {
-			log.Printf("%s %s", r.Method, r.URL.Path)
+		if r.URL.Path == "/api/events" {
+			// Long-lived by design: a start and an end, not a duration.
+			log.Printf("%s %s stream opened (%d watching)", r.Method, r.URL.Path, subscribers()+1)
+			next.ServeHTTP(w, r)
+			log.Printf("%s %s stream closed (%d watching)", r.Method, r.URL.Path, subscribers())
+			return
 		}
-		next.ServeHTTP(w, r)
+
+		start := time.Now()
+		lw := &logged{ResponseWriter: w}
+		next.ServeHTTP(lw, r)
+		if lw.status == 0 {
+			lw.status = http.StatusOK
+		}
+		took := time.Since(start)
+
+		if isFrameRequest(r.URL.Path) {
+			countFrame(lw.status, lw.bytes)
+			// A frame that failed is not routine, so it is said out loud even
+			// though its siblings are counted.
+			if lw.status >= 400 {
+				log.Printf("%s %s?%s %d in %v", r.Method, r.URL.Path, r.URL.RawQuery,
+					lw.status, took.Round(time.Millisecond))
+			}
+			return
+		}
+
+		q := ""
+		if r.URL.RawQuery != "" {
+			// The token is in here on <img> and EventSource URLs; never log it.
+			if v := r.URL.Query(); v.Get("t") != "" {
+				v.Set("t", "…")
+				q = "?" + v.Encode()
+			} else {
+				q = "?" + r.URL.RawQuery
+			}
+		}
+		log.Printf("%s %s%s %d %s in %v", r.Method, r.URL.Path, q, lw.status,
+			humanBytes(int64(lw.bytes)), took.Round(time.Millisecond))
 	})
 }
 

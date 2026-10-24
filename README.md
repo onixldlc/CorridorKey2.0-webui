@@ -254,6 +254,35 @@ ck-url           # print the link, with the current token in it
 ck-web is not running at all, or is running but was started outside
 `onstart.sh`, in which case its output went wherever that start sent it.
 
+### What the log actually says
+
+Everything a job prints goes to the console and the log file as well as to the
+browser. That is where pip, aria2c and infer.py live, so a download that
+stalled or a key that died is readable without a working UI:
+
+```
+[job 1 key/CiPlate] started
+[job 1 key/CiPlate] Running mock inference on: CiPlate - 12 frames, refiner 1.00
+[job 1 key/CiPlate] done after 0s
+```
+
+Phase boundaries are announced once each; the bar behind them ticks about
+once a second and is not worth a line. Requests carry their status, size and
+how long they took, because "the server went down" and "the server answered
+404 in 1 ms" look identical from a browser. A `?t=` token is replaced with an
+ellipsis before anything is written.
+
+The scrubber is the exception: a pass over a 348-frame clip is 348 identical
+lines, so frames are counted and summarised instead.
+
+```
+frames   6 asked in 5s - 6 sent (13 KB), 0 from the browser cache; server cache 12 frames, 12 rendered since boot
+GET /api/events stream opened (1 watching)
+```
+
+That last one matters more than it looks: nothing happening reads very
+differently when nobody is attached to watch it happen.
+
 On Vast.ai specifically, with `-p 8080:8080` in the docker options:
 
 | Field | Value |

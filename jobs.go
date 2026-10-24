@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
+	"log"
 	"sync"
 	"time"
 )
@@ -72,9 +74,10 @@ type Job struct {
 	// and the last phase reached once the job has stopped.
 	Progress *Progress `json:"progress,omitempty"`
 
-	log    []string
-	cancel context.CancelFunc
-	mu     sync.Mutex
+	log         []string
+	loggedPhase string // last phase announced on the server log
+	cancel      context.CancelFunc
+	mu          sync.Mutex
 }
 
 func (j *Job) append(line string) {
@@ -84,7 +87,32 @@ func (j *Job) append(line string) {
 	}
 	j.log = append(j.log, line)
 	j.mu.Unlock()
+	// Also to the server log. A rented box is driven through a console and an
+	// SSH session, and a job whose output exists only inside a browser tab is
+	// a job you cannot diagnose from either: pip, aria2c and infer.py all
+	// print here, and this is where someone looks when the UI will not load.
+	log.Printf("%s %s", j.tag(), line)
 	broadcast(event{Kind: "log", JobID: j.ID, Line: line})
+}
+
+// tag names a job in one short bracket, so a console carrying two lanes at
+// once can still be read: [job 7 install/moge] or [job 8 key/Shot_010].
+func (j *Job) tag() string {
+	what := j.Action
+	switch j.Action {
+	case "run_inference":
+		what = "key"
+	case "generate_alphas":
+		what = "hint"
+	}
+	subject := j.Clip
+	if subject == "" {
+		subject = j.Module
+	}
+	if subject != "" {
+		return fmt.Sprintf("[job %d %s/%s]", j.ID, what, subject)
+	}
+	return fmt.Sprintf("[job %d %s]", j.ID, what)
 }
 
 // setProgress replaces the live phase and tells the page about it. The
@@ -92,7 +120,16 @@ func (j *Job) append(line string) {
 func (j *Job) setProgress(p *Progress) {
 	j.mu.Lock()
 	j.Progress = p
+	changed := p != nil && p.Phase != j.loggedPhase
+	if changed {
+		j.loggedPhase = p.Phase
+	}
 	j.mu.Unlock()
+	// The bar ticks about once a second; only the phase boundaries are worth
+	// a console line, or the log becomes the bar.
+	if changed {
+		log.Printf("%s phase %d/%d — %s", j.tag(), p.Step, p.Steps, p.Phase)
+	}
 	// Its own kind, not "job": a job event makes the page reload the queue and
 	// redraw it, which at one bar update a second would throw away the console
 	// scroll position the operator is reading.
@@ -268,6 +305,7 @@ func (q *Queue) run(j *Job) {
 	j.Started = time.Now()
 	j.mu.Unlock()
 	defer cancel()
+	log.Printf("%s started", j.tag())
 	broadcast(event{Kind: "job", JobID: j.ID})
 
 	var err error
@@ -324,6 +362,7 @@ func (q *Queue) run(j *Job) {
 		j.append("error: " + jerr)
 	}
 	j.append("— " + state + " —")
+	log.Printf("%s %s after %s", j.tag(), state, j.Ended.Sub(j.Started).Round(time.Second))
 	broadcast(event{Kind: "job", JobID: j.ID})
 	broadcast(event{Kind: "clips"})
 	if j.Action == "install" || j.Action == "bootstrap" {
