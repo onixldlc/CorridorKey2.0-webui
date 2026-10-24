@@ -719,3 +719,53 @@ func TestFrameKeyCoversEverythingThatChangesThePicture(t *testing.T) {
 		t.Errorf("the etag is not the quoted key: %s", base.etag())
 	}
 }
+
+// TestStoredTokenSurvivesARestart is the bug this test exists for: -token auto
+// used to mint a new secret every start, so the link in the console, the one
+// in a bookmark and the one a login banner printed all went stale at once and
+// the UI answered "that token was not accepted".
+func TestStoredTokenSurvivesARestart(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cfg.ClipsDir = filepath.Join(t.TempDir(), "ClipsForInference")
+
+	first := storedToken()
+	if len(first) != 24 {
+		t.Fatalf("token %q is not 12 bytes of hex", first)
+	}
+	if got := storedToken(); got != first {
+		t.Errorf("a second start minted a new token: %q then %q", first, got)
+	}
+
+	b, err := os.ReadFile(tokenPath())
+	if err != nil {
+		t.Fatalf("the token was not written: %v", err)
+	}
+	if strings.TrimSpace(string(b)) != first {
+		t.Errorf("the file holds %q, the server uses %q", strings.TrimSpace(string(b)), first)
+	}
+	if st, err := os.Stat(tokenPath()); err == nil && st.Mode().Perm() != 0o600 {
+		t.Errorf("the token file is mode %v, want 0600", st.Mode().Perm())
+	}
+
+	// It lives beside the clips, which is the volume on a rented box. In the
+	// image, /opt/corridorkey is a layer that a container replacement throws
+	// away, so the store must not land under the root.
+	if dir := filepath.Dir(tokenPath()); dir != filepath.Dir(cfg.ClipsDir) {
+		t.Errorf("the token store is at %s, not beside the clips", dir)
+	}
+}
+
+// TestWhitespaceInAStoredTokenIsIgnored — the file is something an operator
+// may well write by hand or echo into place.
+func TestWhitespaceInAStoredTokenIsIgnored(t *testing.T) {
+	old := cfg
+	defer func() { cfg = old }()
+	cfg.ClipsDir = filepath.Join(t.TempDir(), "ClipsForInference")
+	if err := os.WriteFile(tokenPath(), []byte("  abc123\n\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := storedToken(); got != "abc123" {
+		t.Errorf("storedToken() = %q, want %q", got, "abc123")
+	}
+}

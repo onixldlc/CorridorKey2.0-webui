@@ -94,6 +94,15 @@ COPY docker/onstart.sh /usr/local/bin/onstart.sh
 
 RUN chmod +x /usr/local/bin/onstart.sh
 
+# Two commands rather than two paths to remember: what is it doing, and what
+# link do I open. The log one matters most on a rented box, where a server
+# that prints nowhere visible is indistinguishable from a server that hung.
+COPY docker/ck-logs.sh /usr/local/bin/ck-logs
+
+COPY docker/ck-url.sh /usr/local/bin/ck-url
+
+RUN chmod +x /usr/local/bin/ck-logs /usr/local/bin/ck-url
+
 # torch and its CUDA libraries are not baked in. They are 3.3 GB that would
 # otherwise be re-pulled for every release of this UI, in one unsplittable
 # layer, and thrown away with the container. bootstrap.sh puts them in the

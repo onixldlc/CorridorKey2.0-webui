@@ -105,7 +105,7 @@ func main() {
 	queue.start()
 
 	if cfg.Token == "auto" {
-		cfg.Token = newToken()
+		cfg.Token = storedToken()
 	}
 
 	log.Printf("ck-web %s on %s", cfg.Version, cfg.Addr)
@@ -147,6 +147,33 @@ func newToken() string {
 		log.Fatalf("ck-web: could not generate a token: %v", err)
 	}
 	return hex.EncodeToString(b)
+}
+
+// tokenPath is where an -token auto secret is kept: beside the clips, which
+// is the volume on a rented box, so it survives the container being replaced.
+func tokenPath() string { return filepath.Join(filepath.Dir(cfg.ClipsDir), ".ck-web-token") }
+
+// storedToken reads the generated token back, or makes one and saves it.
+//
+// A fresh secret on every restart looks like security and is the opposite of
+// it in practice: the link in the console scrollback, the one in a bookmark
+// and the one a login banner prints all stop working, so the operator is
+// trained to go hunting for the new one — or to run without a token at all.
+// The secret outlives the process instead, and -token <value> still overrides.
+func storedToken() string {
+	path := tokenPath()
+	if b, err := os.ReadFile(path); err == nil {
+		if t := strings.TrimSpace(string(b)); t != "" {
+			return t
+		}
+	}
+	t := newToken()
+	if err := os.WriteFile(path, []byte(t+"\n"), 0o600); err != nil {
+		// Not fatal: the token works for this run, it just will not be the
+		// same one next time, so say which it is going to be.
+		log.Printf("ck-web: could not save the token to %s (%v) — it will change on restart", path, err)
+	}
+	return t
 }
 
 // pageURL renders the link to paste into a browser, token included, because

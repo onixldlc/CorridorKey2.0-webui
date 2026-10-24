@@ -230,11 +230,29 @@ the server in the foreground and never returns, so the token never gets read
 back out of the log and no login banner is written.
 
 It backgrounds the real entrypoint, so the volume is still seeded and the
-pinned keyer revision and the `torch ... cuda True` line still appear — in
-`/var/log/ck-web.log` rather than the container log. It then waits for the
-token, and writes a login banner that prints the externally reachable URL,
-because the link the server logs says `localhost` and the console publishes
-8080 on some other port.
+pinned keyer revision and the `torch ... cuda True` line still appear. Every
+line goes to three places at once: `/var/log/ck-web.log`, the terminal that
+ran it, and PID 1's stdout — which is what the console shows as the instance
+log. In an SSH launch mode PID 1 is the console's own shell server, so that
+last one has to be handed over explicitly or the instance log stays empty
+while the server talks to a file nobody mentioned.
+
+Run it a second time and it does not just say "already running". The reason
+anyone runs it twice is to find out what the server is doing, so it prints the
+link and then shows the log — following it on a terminal, or the last 200
+lines when there is none, so the console's own boot-time run cannot block
+forever on a log that never ends. Ctrl-C stops watching, not the server.
+
+Two commands do the same jobs on their own:
+
+```
+ck-logs          # follow the log; ck-logs -n 50 for the last 50 lines
+ck-url           # print the link, with the current token in it
+```
+
+`ck-logs` also explains an empty log rather than printing nothing: whether
+ck-web is not running at all, or is running but was started outside
+`onstart.sh`, in which case its output went wherever that start sent it.
 
 On Vast.ai specifically, with `-p 8080:8080` in the docker options:
 
@@ -580,6 +598,16 @@ The defaults assume a checkout on the host; the image overrides them because
 there the keyer is in the image and only the data is mounted.
 
 ## Security
+
+`-token auto` generates the secret once and keeps it in `.ck-web-token`
+beside the clips — the volume on a rented box, mode 0600. It is reused on
+every later start, so the link in the console scrollback, the one a login
+banner prints and the one in a bookmark all keep working across a restart, a
+container replacement and an image upgrade. A fresh secret per start reads as
+stricter and is the opposite in practice: everything already handed out dies
+at once, the UI answers *that token was not accepted*, and the operator is
+trained either to go hunting or to run with no token at all. `-token <value>`
+still overrides, and still wins over the stored one.
 
 The token is the only gate and it is compared as a plain string over whatever
 transport you give it. Bind to `127.0.0.1` and tunnel, or put a TLS proxy in
